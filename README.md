@@ -1,4 +1,4 @@
-2023 Refactor of XMI2MID.EXE by Markus Hein / Kimio Ito
+2025 Refactor of XMI2MID.EXE by Markus Hein / Kimio Ito
 
 **Table-of-Contents**
 - [Build](#build)
@@ -24,7 +24,7 @@ build.cmd
 Supply the path to the XMI file as the first argument.
 
 ```cmd
-xmi2mid.exe "C:\Path\To\XMI\File.xmi"
+xmi2mid.exe "C:\Path\To\XMI\Input.xmi" "C:\Path\To\XMI\Output.mid"
 ```
 
 # Notes
