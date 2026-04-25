@@ -16,8 +16,6 @@
 
 # Build
 
-PowerShell scripts use the `.ps1` extension, but this repository intentionally uses `build.cmd` because the Visual Studio C++ environment setup is batch-based and `.cmd` runs cleanly from PowerShell.
-
 Windows, from a normal, non-Administrator Developer PowerShell for Visual Studio 2022:
 
 ```cmd
