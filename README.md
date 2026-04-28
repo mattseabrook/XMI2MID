@@ -1,11 +1,12 @@
 **Table-of-Contents**
+- [Usage](#usage)
 - [Header Only Implementation](#header-only-implementation)
 - [Build](#build)
-- [Usage](#usage)
 - [XMI Specifications](#xmi-specifications)
   - [Multiple XMI Songs](#multiple-xmi-songs)
 - [References](#references)
-- [Change Log](#change-log)
+- [CHANGELOG](#changelog)
+  - [2026-04-28](#2026-04-28)
   - [2026-04-24](#2026-04-24)
     - [Source](#source)
     - [Windows](#windows)
@@ -15,6 +16,48 @@
   - [2023](#2023)
   - [2015](#2015)
   - [1994](#1994)
+
+# Usage
+
+Convert sequence 0 from `Reference/AIL2/DEMO.XMI`:
+
+```cmd
+xmi2mid.exe Reference\AIL2\DEMO.XMI demo.mid
+```
+
+```sh
+./xmi2mid Reference/AIL2/DEMO.XMI demo.mid
+```
+
+List the XMI sequences:
+
+```cmd
+xmi2mid.exe --list Reference\AIL2\DEMO.XMI
+```
+
+```sh
+./xmi2mid --list Reference/AIL2/DEMO.XMI
+```
+
+Convert one zero-based sequence explicitly:
+
+```cmd
+xmi2mid.exe --sequence 0 Reference\AIL2\DEMO.XMI demo.mid
+```
+
+```sh
+./xmi2mid --sequence 0 Reference/AIL2/DEMO.XMI demo.mid
+```
+
+Convert every sequence to separate files:
+
+```cmd
+xmi2mid.exe --all Reference\AIL2\DEMO.XMI demo
+```
+
+```sh
+./xmi2mid --all Reference/AIL2/DEMO.XMI demo
+```
 
 # Header Only Implementation
 
@@ -73,48 +116,6 @@ macOS:
 
 `./build.command` asks Apple's toolchain for the default C++ compiler with `xcrun --find c++`, then falls back to `c++` if needed. If the compiler is missing, install Apple's Command Line Tools with `xcode-select --install`.
 
-# Usage
-
-Convert sequence 0 from `Reference/AIL2/DEMO.XMI`:
-
-```cmd
-xmi2mid.exe Reference\AIL2\DEMO.XMI demo.mid
-```
-
-```sh
-./xmi2mid Reference/AIL2/DEMO.XMI demo.mid
-```
-
-List the XMI sequences:
-
-```cmd
-xmi2mid.exe --list Reference\AIL2\DEMO.XMI
-```
-
-```sh
-./xmi2mid --list Reference/AIL2/DEMO.XMI
-```
-
-Convert one zero-based sequence explicitly:
-
-```cmd
-xmi2mid.exe --sequence 0 Reference\AIL2\DEMO.XMI demo.mid
-```
-
-```sh
-./xmi2mid --sequence 0 Reference/AIL2/DEMO.XMI demo.mid
-```
-
-Convert every sequence to separate files:
-
-```cmd
-xmi2mid.exe --all Reference\AIL2\DEMO.XMI demo
-```
-
-```sh
-./xmi2mid --all Reference/AIL2/DEMO.XMI demo
-```
-
 # XMI Specifications
 
 XMIDI is the preprocessed MIDI sequence format used by the IBM Audio Interface Library 2.x and later Miles Sound System lineage. The primary source in this repository is John Miles' AIL2 release under [Reference/AIL2](Reference/AIL2), especially [XMIDI.TXT](Reference/AIL2/DOC/XMIDI.TXT), [TOOLS.TXT](Reference/AIL2/DOC/TOOLS.TXT), [API.TXT](Reference/AIL2/DOC/API.TXT), [MIDIFORM.C](Reference/AIL2/MIDIFORM.C), [XPLAY.C](Reference/AIL2/XPLAY.C), and [XMIDI.ASM](Reference/AIL2/XMIDI.ASM). External format summaries agree with the same overall structure [1][2].
@@ -167,30 +168,57 @@ AIL-specific controllers occupy MIDI Control Change numbers 110 through 120. The
 
 An XMI file can contain multiple songs because `CAT XMID` is a catalog of repeated `FORM XMID` sequence chunks. MIDIFORM creates this directly: it writes `FORM XDIR/INFO`, opens one `CAT XMID`, then appends one `FORM XMID` for each input MIDI file. The AIL API exposes this as a zero-based `sequence_num`; `XPLAY` passes the optional command-line sequence number to `AIL_register_sequence()`, and `XMIDI.ASM::find_seq` scans to the requested Nth `FORM XMID`.
 
-The converter now parses the IFF container into sequence descriptors before converting. The default conversion path still uses sequence 0, matching the original single-song behavior, but both the CLI and header-only API can list, select, or convert every sequence in a multi-song XMI.
-
-CLI support:
-
-- `--list Reference/AIL2/DEMO.XMI` prints the discovered sequence count and chunk offsets/sizes.
-- `Reference/AIL2/DEMO.XMI demo.mid` converts sequence 0.
-- `--sequence 0 Reference/AIL2/DEMO.XMI demo.mid` converts one zero-based sequence explicitly.
-- `--all Reference/AIL2/DEMO.XMI demo` writes every sequence as separate files such as `demo_00.mid`, `demo_01.mid`, and so on.
-
-Header API support:
-
-- `xmi2mid::sequence_count(xmiBytes)` returns the number of `FORM XMID` sequences.
-- `xmi2mid::sequence_infos(xmiBytes)` returns offsets, sizes, and `TIMB`/`RBRN` presence for each sequence.
-- `xmi2mid::convert(xmiBytes)` converts sequence 0.
-- `xmi2mid::convert(xmiBytes, sequenceIndex)` converts one zero-based sequence.
-- `xmi2mid::convert_all(xmiBytes)` returns one MIDI byte vector per sequence.
-
 # References
 
 1. ["XMI Format."](https://moddingwiki.shikadi.net/wiki/XMI_Format) ModdingWiki. Synopsis: community-maintained technical notes on the XMI IFF layout, `XDIR`, `CAT XMID`, `TIMB`, `RBRN`, `EVNT`, note durations, and XMI delay encoding.
 2. ["XMI."](https://vgmpf.com/Wiki/index.php?title=XMI) Video Game Music Preservation Foundation Wiki. Synopsis: preservation-oriented overview of XMI history, game usage, players/converters, IFF tree structure, 120 Hz timing, and multi-subsong layout.
 3. [John Miles, KE5FX.](http://www.ke5fx.com/) Synopsis: John Miles' homepage and software archive, used here as the author/source reference point for the Audio Interface Library and Miles Sound System materials.
 
-# Change Log
+# CHANGELOG
+
+## 2026-04-28
+
+- Added root `xmi2mid.hpp` as a single-header C++20 conversion API.
+- Exposed `xmi2mid::convert(std::span<const std::uint8_t>)` as the sequence-0 convenience conversion function.
+- Exposed `xmi2mid::convert(std::span<const std::uint8_t>, std::size_t)` for explicit zero-based XMI sequence conversion.
+- Exposed `xmi2mid::convert_all(std::span<const std::uint8_t>)` to return one MIDI byte vector per XMI sequence.
+- Exposed `xmi2mid::sequence_count(std::span<const std::uint8_t>)` for lightweight sequence counting.
+- Exposed `xmi2mid::sequence_infos(std::span<const std::uint8_t>)` for sequence metadata discovery.
+- Added `xmi2mid::sequence_info` with sequence index, `FORM XMID` offset/size, `EVNT` offset/size, and `TIMB`/`RBRN` presence flags.
+- Moved the reusable conversion boundary to the header-only API while keeping the CLI as a thin file-I/O and argument-parsing wrapper.
+- Replaced the CLI's earlier fixed single-sequence chunk walk with the shared IFF sequence discovery logic from the header API.
+- Added CLI `--list` support to print every discovered XMI sequence with `FORM` and `EVNT` offsets and sizes.
+- Added CLI `--sequence N` support to convert a specific zero-based sequence from a multi-song XMI file.
+- Added CLI `--all` support to convert every sequence in an XMI file to separate MIDI files.
+- Kept the existing two-path CLI form as the default sequence-0 conversion path.
+- Changed CLI success messages to report the converted sequence index.
+- Added checked parsing for decimal sequence indexes, including empty, non-numeric, and overflow cases.
+- Added out-of-range sequence index errors that report both the requested index and discovered sequence count.
+- Added deterministic multi-sequence output naming with zero-padded suffixes such as `_00`, `_01`, and `_02`.
+- Made `--all` write into an existing output directory when the output target is a directory.
+- Made `--all` treat a non-directory output target as a filename stem while preserving a provided extension when present.
+- Added support for bare `FORM XMID` inputs in addition to the common `FORM XDIR` plus `CAT XMID` container layout.
+- Added support for optional or absent `TIMB` and `RBRN` chunks during sequence discovery.
+- Preserved IFF odd-length chunk padding handling when scanning root chunks, catalog children, and sequence-local chunks.
+- Added validation for truncated root IFF chunk headers, `CAT` child chunk headers, `FORM XMID` local chunk headers, and chunk payload lengths.
+- Preserved MIDI Format 0 output, 960 PPQN timing, XMI note-duration handling, tempo rescaling, SysEx pass-through, meta-event pass-through, and pending note-off flushing in the header API.
+- Updated README usage examples to use `Reference/AIL2/DEMO.XMI` consistently.
+- Updated README usage documentation for default conversion, `--list`, `--sequence`, and `--all`.
+- Added README documentation for the header-only API, including indexed conversion and all-sequence conversion examples.
+- Added README XMI specification notes covering the EA IFF-style layout, `XDIR/INFO`, `CAT XMID`, repeated `FORM XMID` sequence chunks, `TIMB`, `RBRN`, and `EVNT`.
+- Documented XMI event-stream behavior: summed delay bytes, omitted zero delays, no running status, Note On duration payloads, removed Note Off events, 120 Hz quantization, and MIDI delta scaling.
+- Documented the AIL/XMIDI controller range from 110 through 120.
+- Documented how multi-song XMI files are created and selected in the original AIL2 tooling and runtime.
+- Added numbered README references with synopses and direct links for ModdingWiki, VGMPF, and John Miles' KE5FX site.
+- Confirmed `Reference/AIL2/DEMO.XMI` contains three `FORM XMID` sequences.
+- Verified header multi-song conversion against a synthetic two-sequence XMI file.
+- Verified header sequence discovery, sequence count, indexed conversion, and all-sequence conversion against `Reference/AIL2/DEMO.XMI`.
+- Verified CLI `--list`, default sequence-0 conversion, `--sequence`, and `--all` against `Reference/AIL2/DEMO.XMI`.
+- Verified CLI `--list`, `--sequence 1`, and `--all` against a synthetic two-sequence XMI file.
+- Verified default sequence-0 output matches explicit `--sequence 0` output for `Reference/AIL2/DEMO.XMI`.
+- Verified `--all` sequence-0 output matches default sequence-0 output for `Reference/AIL2/DEMO.XMI`.
+- Rebuilt successfully with `./build.sh`.
+- Cleaned generated build outputs with `./build.sh clean`.
 
 ## 2026-04-24
 
@@ -218,10 +246,6 @@ Header API support:
 - Consolidated channel event size handling into a small helper.
 - Added `read_file` and `write_file` helpers with checked binary I/O.
 - Kept the command-line interface as two explicit paths.
-- Removed reliance on Visual Studio solution and project files for building.
-- Removed remaining `.sln`, `.vcxproj`, `.vcxproj.filters`, and `.vcxproj.user` files from the active tree.
-- Verified a minimal synthetic XMI can be converted to a valid minimal MIDI header and track.
-- Confirmed a repo sweep no longer finds active `.sln` or `.vcxproj` build files.
 
 ### Windows
 
@@ -233,6 +257,8 @@ Header API support:
 - Made `build.cmd` copy only the finished `xmi2mid.exe` back to the repository root.
 - Made `build.cmd` remove read-only attributes from an existing `xmi2mid.exe` before replacing it.
 - Added clearer `build.cmd` errors for missing source files, missing compilers, temporary directory failures, and denied final copies.
+- Removed reliance on Visual Studio solution and project files for building.
+- Removed remaining `.sln`, `.vcxproj`, `.vcxproj.filters`, and `.vcxproj.user` files from the active tree.
 
 ### Linux
 
