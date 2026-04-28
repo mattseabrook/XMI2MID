@@ -4,7 +4,7 @@
 
     XMI2MID: XMIDI to MIDI converter
 
-    Converts the *.XMI supplied as argv[1] to a MIDI Format 0 file (argv[2]).
+    Converts XMI sequences to MIDI Format 0 files.
 
     Author: Matt Seabrook
     Email: info@mattseabrook.net
@@ -32,14 +32,16 @@
 
 */
 
-#include <algorithm>
-#include <array>
+#include "xmi2mid.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -47,173 +49,15 @@
 
 namespace
 {
-struct NoteOffEvent
+std::vector<std::uint8_t> read_file(const std::filesystem::path& path)
 {
-    uint32_t delta = 0;
-    uint8_t status = 0;
-    uint8_t note = 0;
-};
-
-constexpr size_t MaxNoteOffs = 1000;
-constexpr uint32_t DefaultTempo = 120;
-constexpr uint32_t XmiFreq = 120;
-constexpr uint32_t DefaultTimebase = XmiFreq * 60 / DefaultTempo;
-constexpr uint32_t DefaultQuarterNoteMicros = 60 * 1'000'000 / DefaultTempo;
-constexpr uint16_t MidiTimebase = 960;
-constexpr size_t TrackLengthOffset = 18;
-constexpr size_t TrackDataOffset = 22;
-
-void need_bytes(const uint8_t* cursor, const uint8_t* end, size_t count, std::string_view context)
-{
-    if (count > static_cast<size_t>(end - cursor))
-    {
-        throw std::runtime_error("Invalid XMI: truncated " + std::string(context));
-    }
-}
-
-bool has_tag(const uint8_t* cursor, const uint8_t* end, std::string_view tag)
-{
-    return tag.size() <= static_cast<size_t>(end - cursor) && std::equal(tag.begin(), tag.end(), cursor);
-}
-
-void skip_tag(const uint8_t*& cursor, const uint8_t* end, std::string_view tag)
-{
-    if (!has_tag(cursor, end, tag))
-    {
-        throw std::runtime_error("Invalid XMI: expected " + std::string(tag));
-    }
-    cursor += tag.size();
-}
-
-void skip_bytes(const uint8_t*& cursor, const uint8_t* end, size_t count, std::string_view context)
-{
-    need_bytes(cursor, end, count, context);
-    cursor += count;
-}
-
-uint32_t read_be32(const uint8_t*& cursor, const uint8_t* end)
-{
-    need_bytes(cursor, end, 4, "32-bit integer");
-    const uint32_t value = (static_cast<uint32_t>(cursor[0]) << 24) |
-                           (static_cast<uint32_t>(cursor[1]) << 16) |
-                           (static_cast<uint32_t>(cursor[2]) << 8) |
-                           static_cast<uint32_t>(cursor[3]);
-    cursor += 4;
-    return value;
-}
-
-void append_be32(std::vector<uint8_t>& bytes, uint32_t value)
-{
-    bytes.push_back(static_cast<uint8_t>(value >> 24));
-    bytes.push_back(static_cast<uint8_t>(value >> 16));
-    bytes.push_back(static_cast<uint8_t>(value >> 8));
-    bytes.push_back(static_cast<uint8_t>(value));
-}
-
-void patch_be32(std::vector<uint8_t>& bytes, size_t offset, uint32_t value)
-{
-    bytes[offset] = static_cast<uint8_t>(value >> 24);
-    bytes[offset + 1] = static_cast<uint8_t>(value >> 16);
-    bytes[offset + 2] = static_cast<uint8_t>(value >> 8);
-    bytes[offset + 3] = static_cast<uint8_t>(value);
-}
-
-uint32_t read_varlen(const uint8_t*& cursor, const uint8_t* end)
-{
-    uint32_t value = 0;
-    for (int byteCount = 0; byteCount < 5; ++byteCount)
-    {
-        need_bytes(cursor, end, 1, "variable-length integer");
-        const uint8_t byte = *cursor++;
-        value = (value << 7) | (byte & 0x7F);
-        if ((byte & 0x80) == 0)
-        {
-            return value;
-        }
-    }
-    throw std::runtime_error("Invalid XMI: variable-length integer is too large");
-}
-
-void append_varlen(std::vector<uint8_t>& bytes, uint32_t value)
-{
-    std::array<uint8_t, 5> encoded{};
-    size_t count = 0;
-    encoded[count++] = static_cast<uint8_t>(value & 0x7F);
-
-    while ((value >>= 7) != 0)
-    {
-        encoded[count++] = static_cast<uint8_t>((value & 0x7F) | 0x80);
-    }
-
-    while (count != 0)
-    {
-        bytes.push_back(encoded[--count]);
-    }
-}
-
-uint32_t read_xmi_delta(const uint8_t*& cursor, const uint8_t* end)
-{
-    uint32_t delay = 0;
-    while (cursor != end && *cursor == 0x7F)
-    {
-        delay += *cursor++;
-    }
-
-    need_bytes(cursor, end, 1, "XMI delta");
-    return delay + *cursor++;
-}
-
-uint32_t scale_delta(uint32_t delta, uint32_t quarterNoteMicros)
-{
-    const uint64_t denominator = static_cast<uint64_t>(quarterNoteMicros) * DefaultTimebase;
-    if (denominator == 0)
-    {
-        throw std::runtime_error("Invalid MIDI tempo: zero quarter-note length");
-    }
-
-    const uint64_t numerator = static_cast<uint64_t>(delta) * MidiTimebase * DefaultQuarterNoteMicros;
-    return static_cast<uint32_t>((numerator + denominator / 2) / denominator);
-}
-
-void append_scaled_delta(std::vector<uint8_t>& midi, uint32_t delta, uint32_t quarterNoteMicros)
-{
-    append_varlen(midi, scale_delta(delta, quarterNoteMicros));
-}
-
-void append_bytes(std::vector<uint8_t>& midi, const uint8_t*& cursor, const uint8_t* end, size_t count)
-{
-    need_bytes(cursor, end, count, "event payload");
-    midi.insert(midi.end(), cursor, cursor + count);
-    cursor += count;
-}
-
-size_t channel_event_size(uint8_t status)
-{
-    switch (status & 0xF0)
-    {
-    case 0x80:
-    case 0x90:
-    case 0xA0:
-    case 0xB0:
-    case 0xE0:
-        return 3;
-    case 0xC0:
-    case 0xD0:
-        return 2;
-    default:
-        return 0;
-    }
-}
-
-std::vector<uint8_t> read_file(const std::filesystem::path& path)
-{
-    const uintmax_t fileSize = std::filesystem::file_size(path);
-    if (fileSize > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max()))
+    const std::uintmax_t fileSize = std::filesystem::file_size(path);
+    if (fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max()))
     {
         throw std::runtime_error("Input file is too large");
     }
 
-    std::vector<uint8_t> bytes(static_cast<size_t>(fileSize));
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(fileSize));
     std::ifstream file(path, std::ios::binary);
     if (!file)
     {
@@ -228,7 +72,7 @@ std::vector<uint8_t> read_file(const std::filesystem::path& path)
     return bytes;
 }
 
-void write_file(const std::filesystem::path& path, std::span<const uint8_t> bytes)
+void write_file(const std::filesystem::path& path, std::span<const std::uint8_t> bytes)
 {
     std::ofstream file(path, std::ios::binary);
     if (!file)
@@ -242,230 +86,180 @@ void write_file(const std::filesystem::path& path, std::span<const uint8_t> byte
         throw std::runtime_error("Cannot write output file " + path.string());
     }
 }
+
+std::size_t parse_sequence_index(std::string_view text)
+{
+    if (text.empty())
+    {
+        throw std::runtime_error("Missing sequence index");
+    }
+
+    std::size_t value = 0;
+    for (const char ch : text)
+    {
+        if (ch < '0' || ch > '9')
+        {
+            throw std::runtime_error("Invalid sequence index " + std::string(text));
+        }
+
+        const std::size_t digit = static_cast<std::size_t>(ch - '0');
+        if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10)
+        {
+            throw std::runtime_error("Sequence index is too large");
+        }
+        value = (value * 10) + digit;
+    }
+    return value;
 }
 
-std::vector<uint8_t> xmiConverter(std::span<const uint8_t> xmi)
+std::string sequence_suffix(std::size_t index, std::size_t count)
 {
-    if (xmi.empty())
+    const std::size_t width = std::max<std::size_t>(2, std::to_string(count == 0 ? 0 : count - 1).size());
+    std::ostringstream suffix;
+    suffix << std::setfill('0') << std::setw(static_cast<int>(width)) << index;
+    return suffix.str();
+}
+
+std::filesystem::path sequence_output_path(const std::filesystem::path& inputPath,
+                                           const std::filesystem::path& outputTarget,
+                                           std::size_t index,
+                                           std::size_t count)
+{
+    const std::string suffix = sequence_suffix(index, count);
+    if (std::filesystem::exists(outputTarget) && std::filesystem::is_directory(outputTarget))
     {
-        throw std::runtime_error("Invalid XMI: empty file");
+        return outputTarget / (inputPath.stem().string() + "_" + suffix + ".mid");
     }
 
-    const uint8_t* cursor = xmi.data();
-    const uint8_t* const end = cursor + xmi.size();
-
-    skip_tag(cursor, end, "FORM");
-    read_be32(cursor, end);
-    skip_tag(cursor, end, "XDIR");
-    skip_tag(cursor, end, "INFO");
-    skip_bytes(cursor, end, read_be32(cursor, end), "INFO chunk");
-    skip_tag(cursor, end, "CAT ");
-    read_be32(cursor, end);
-    skip_tag(cursor, end, "XMID");
-    skip_tag(cursor, end, "FORM");
-    read_be32(cursor, end);
-    skip_tag(cursor, end, "XMID");
-    skip_tag(cursor, end, "TIMB");
-    skip_bytes(cursor, end, read_be32(cursor, end), "TIMB chunk");
-
-    if (has_tag(cursor, end, "RBRN"))
+    std::filesystem::path extension = outputTarget.extension();
+    if (extension.empty())
     {
-        cursor += 4;
-        skip_bytes(cursor, end, read_be32(cursor, end), "RBRN chunk");
+        extension = ".mid";
     }
 
-    skip_tag(cursor, end, "EVNT");
-    const uint32_t eventLength = read_be32(cursor, end);
-    need_bytes(cursor, end, eventLength, "EVNT chunk");
-    const uint8_t* const eventEnd = cursor + eventLength;
-
-    std::vector<uint8_t> midi;
-    midi.reserve((xmi.size() * 2) + TrackDataOffset);
-    midi.insert(midi.end(), {'M', 'T', 'h', 'd'});
-    append_be32(midi, 6);
-    midi.push_back(0);
-    midi.push_back(0);
-    midi.push_back(0);
-    midi.push_back(1);
-    midi.push_back(static_cast<uint8_t>(MidiTimebase >> 8));
-    midi.push_back(static_cast<uint8_t>(MidiTimebase));
-    midi.insert(midi.end(), {'M', 'T', 'r', 'k', 0, 0, 0, 0});
-
-    std::array<NoteOffEvent, MaxNoteOffs> noteOffs{};
-    size_t noteOffCount = 0;
-    uint32_t quarterNoteMicros = DefaultQuarterNoteMicros;
-    bool expectDelta = true;
-
-    auto append_note_off = [&](const NoteOffEvent& event)
+    std::string stem = outputTarget.stem().string();
+    if (stem.empty())
     {
-        midi.push_back(event.status & 0x8F);
-        midi.push_back(event.note);
-        midi.push_back(0x7F);
-    };
-
-    auto queue_note_off = [&](uint32_t delta, uint8_t status, uint8_t note)
-    {
-        if (noteOffCount == noteOffs.size())
-        {
-            throw std::runtime_error("Too many pending note-off events");
-        }
-
-        const auto first = noteOffs.begin();
-        const auto last = first + static_cast<std::ptrdiff_t>(noteOffCount);
-        const auto insertAt = std::upper_bound(first, last, delta, [](uint32_t value, const NoteOffEvent& event)
-        {
-            return value < event.delta;
-        });
-
-        std::move_backward(insertAt, last, last + 1);
-        *insertAt = NoteOffEvent{delta, status, note};
-        ++noteOffCount;
-    };
-
-    auto pop_note_off = [&]
-    {
-        const NoteOffEvent event = noteOffs[0];
-        append_scaled_delta(midi, event.delta, quarterNoteMicros);
-        append_note_off(event);
-
-        for (size_t i = 1; i < noteOffCount; ++i)
-        {
-            noteOffs[i].delta -= event.delta;
-        }
-
-        std::move(noteOffs.begin() + 1, noteOffs.begin() + static_cast<std::ptrdiff_t>(noteOffCount), noteOffs.begin());
-        --noteOffCount;
-    };
-
-    auto begin_event = [&]
-    {
-        if (expectDelta)
-        {
-            append_scaled_delta(midi, 0, quarterNoteMicros);
-        }
-        expectDelta = true;
-    };
-
-    while (cursor < eventEnd)
-    {
-        if (*cursor < 0x80)
-        {
-            uint32_t delay = read_xmi_delta(cursor, eventEnd);
-
-            while (noteOffCount != 0 && delay > noteOffs[0].delta)
-            {
-                delay -= noteOffs[0].delta;
-                pop_note_off();
-            }
-
-            for (size_t i = 0; i < noteOffCount; ++i)
-            {
-                noteOffs[i].delta -= delay;
-            }
-
-            append_scaled_delta(midi, delay, quarterNoteMicros);
-            expectDelta = false;
-            continue;
-        }
-
-        const uint8_t status = *cursor;
-        if (status == 0xFF)
-        {
-            need_bytes(cursor, eventEnd, 2, "meta event");
-            const uint8_t metaType = cursor[1];
-            begin_event();
-
-            if (metaType == 0x2F)
-            {
-                cursor += 2;
-                const uint32_t metaLength = read_varlen(cursor, eventEnd);
-                skip_bytes(cursor, eventEnd, metaLength, "end-of-track payload");
-
-                for (size_t i = 0; i < noteOffCount; ++i)
-                {
-                    append_note_off(noteOffs[i]);
-                    append_scaled_delta(midi, 0, quarterNoteMicros);
-                }
-
-                midi.push_back(0xFF);
-                midi.push_back(0x2F);
-                midi.push_back(0);
-                break;
-            }
-
-            midi.push_back(*cursor++);
-            midi.push_back(*cursor++);
-            const uint8_t* const lengthStart = cursor;
-            const uint32_t metaLength = read_varlen(cursor, eventEnd);
-            midi.insert(midi.end(), lengthStart, cursor);
-            need_bytes(cursor, eventEnd, metaLength, "meta payload");
-
-            if (metaType == 0x51 && metaLength == 3)
-            {
-                quarterNoteMicros = (static_cast<uint32_t>(cursor[0]) << 16) |
-                                    (static_cast<uint32_t>(cursor[1]) << 8) |
-                                    static_cast<uint32_t>(cursor[2]);
-            }
-
-            midi.insert(midi.end(), cursor, cursor + metaLength);
-            cursor += metaLength;
-        }
-        else if (status == 0xF0 || status == 0xF7)
-        {
-            begin_event();
-            midi.push_back(*cursor++);
-            const uint8_t* const lengthStart = cursor;
-            const uint32_t sysexLength = read_varlen(cursor, eventEnd);
-            midi.insert(midi.end(), lengthStart, cursor);
-            append_bytes(midi, cursor, eventEnd, sysexLength);
-        }
-        else
-        {
-            const size_t eventSize = channel_event_size(status);
-            if (eventSize == 0)
-            {
-                ++cursor;
-                expectDelta = true;
-                continue;
-            }
-
-            begin_event();
-            const uint8_t eventStatus = cursor[0];
-            const uint8_t eventNote = eventSize > 1 ? cursor[1] : 0;
-            append_bytes(midi, cursor, eventEnd, eventSize);
-
-            if ((eventStatus & 0xF0) == 0x90)
-            {
-                queue_note_off(read_varlen(cursor, eventEnd), eventStatus, eventNote);
-            }
-        }
+        stem = inputPath.stem().string();
     }
 
-    const size_t trackLength = midi.size() - TrackDataOffset;
-    if (trackLength > std::numeric_limits<uint32_t>::max())
-    {
-        throw std::runtime_error("MIDI track is too large");
-    }
+    return outputTarget.parent_path() / (stem + "_" + suffix + extension.string());
+}
 
-    patch_be32(midi, TrackLengthOffset, static_cast<uint32_t>(trackLength));
-    return midi;
+void print_sequence_list(const std::filesystem::path& inputPath, const std::vector<xmi2mid::sequence_info>& sequences)
+{
+    std::cout << inputPath.string() << ": " << sequences.size() << " sequence(s)\n";
+    for (const xmi2mid::sequence_info& sequence : sequences)
+    {
+        std::cout << "  [" << sequence.index << "] "
+                  << "FORM offset " << sequence.form_offset
+                  << ", FORM bytes " << sequence.form_size
+                  << ", EVNT offset " << sequence.event_offset
+                  << ", EVNT bytes " << sequence.event_size
+                  << ", TIMB " << (sequence.has_timb ? "yes" : "no")
+                  << ", RBRN " << (sequence.has_rbrn ? "yes" : "no") << '\n';
+    }
+}
+
+void print_usage(const char* program)
+{
+    std::cerr << "Usage:\n"
+              << "  " << program << " Reference/AIL2/DEMO.XMI demo.mid\n"
+              << "  " << program << " --sequence 0 Reference/AIL2/DEMO.XMI demo.mid\n"
+              << "  " << program << " --all Reference/AIL2/DEMO.XMI demo\n"
+              << "  " << program << " --list Reference/AIL2/DEMO.XMI\n";
+}
 }
 
 int main(int argc, char* argv[])
 {
-    if (argc != 3)
+    if (argc < 2)
     {
-        std::cerr << "Usage: " << argv[0] << " <input.xmi> <output.mid>\n";
+        print_usage(argv[0]);
         return 1;
     }
 
     try
     {
-        const auto xmiData = read_file(argv[1]);
-        const auto midiData = xmiConverter(xmiData);
-        write_file(argv[2], midiData);
-        std::cout << "Converted " << argv[1] << " to " << argv[2] << '\n';
-        return 0;
+        const std::string_view command = argv[1];
+
+        if (command == "--help" || command == "-h")
+        {
+            print_usage(argv[0]);
+            return 0;
+        }
+
+        if (command == "--list")
+        {
+            if (argc != 3)
+            {
+                print_usage(argv[0]);
+                return 1;
+            }
+
+            const std::filesystem::path inputPath = argv[2];
+            const auto xmiData = read_file(inputPath);
+            print_sequence_list(inputPath, xmi2mid::sequence_infos(xmiData));
+            return 0;
+        }
+
+        if (command == "--sequence")
+        {
+            if (argc != 5)
+            {
+                print_usage(argv[0]);
+                return 1;
+            }
+
+            const std::size_t sequenceIndex = parse_sequence_index(argv[2]);
+            const std::filesystem::path inputPath = argv[3];
+            const std::filesystem::path outputPath = argv[4];
+            const auto xmiData = read_file(inputPath);
+            const auto midiData = xmi2mid::convert(xmiData, sequenceIndex);
+            write_file(outputPath, midiData);
+            std::cout << "Converted sequence " << sequenceIndex << " from "
+                      << inputPath.string() << " to " << outputPath.string() << '\n';
+            return 0;
+        }
+
+        if (command == "--all")
+        {
+            if (argc != 4)
+            {
+                print_usage(argv[0]);
+                return 1;
+            }
+
+            const std::filesystem::path inputPath = argv[2];
+            const std::filesystem::path outputTarget = argv[3];
+            const auto xmiData = read_file(inputPath);
+            const auto midiFiles = xmi2mid::convert_all(xmiData);
+
+            for (std::size_t index = 0; index < midiFiles.size(); ++index)
+            {
+                const std::filesystem::path outputPath =
+                    sequence_output_path(inputPath, outputTarget, index, midiFiles.size());
+                write_file(outputPath, midiFiles[index]);
+                std::cout << "Converted sequence " << index << " from "
+                          << inputPath.string() << " to " << outputPath.string() << '\n';
+            }
+            return 0;
+        }
+
+        if (argc == 3)
+        {
+            const std::filesystem::path inputPath = argv[1];
+            const std::filesystem::path outputPath = argv[2];
+            const auto xmiData = read_file(inputPath);
+            const auto midiData = xmi2mid::convert(xmiData);
+            write_file(outputPath, midiData);
+            std::cout << "Converted sequence 0 from "
+                      << inputPath.string() << " to " << outputPath.string() << '\n';
+            return 0;
+        }
+
+        print_usage(argv[0]);
+        return 1;
     }
     catch (const std::exception& error)
     {

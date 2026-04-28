@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -13,7 +14,210 @@
 
 namespace xmi2mid
 {
-inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi)
+struct sequence_info
+{
+    std::size_t index = 0;
+    std::size_t form_offset = 0;
+    std::size_t form_size = 0;
+    std::size_t event_offset = 0;
+    std::size_t event_size = 0;
+    bool has_timb = false;
+    bool has_rbrn = false;
+};
+
+namespace detail
+{
+inline void need_bytes(const std::uint8_t* cursor, const std::uint8_t* end, std::size_t count,
+                       std::string_view context)
+{
+    if (cursor > end || count > static_cast<std::size_t>(end - cursor))
+    {
+        throw std::runtime_error("Invalid XMI: truncated " + std::string(context));
+    }
+}
+
+inline bool has_tag(const std::uint8_t* cursor, const std::uint8_t* end, std::string_view tag)
+{
+    return cursor <= end && tag.size() <= static_cast<std::size_t>(end - cursor) &&
+           std::equal(tag.begin(), tag.end(), cursor);
+}
+
+inline std::uint32_t read_be32(const std::uint8_t*& cursor, const std::uint8_t* end)
+{
+    need_bytes(cursor, end, 4, "32-bit integer");
+    const std::uint32_t value = (static_cast<std::uint32_t>(cursor[0]) << 24) |
+                                (static_cast<std::uint32_t>(cursor[1]) << 16) |
+                                (static_cast<std::uint32_t>(cursor[2]) << 8) |
+                                static_cast<std::uint32_t>(cursor[3]);
+    cursor += 4;
+    return value;
+}
+
+inline const std::uint8_t* chunk_payload_end(const std::uint8_t* payload, const std::uint8_t* limit,
+                                             std::uint32_t length, std::string_view context)
+{
+    need_bytes(payload, limit, length, context);
+    return payload + length;
+}
+
+inline const std::uint8_t* next_chunk(const std::uint8_t* payloadEnd, const std::uint8_t* limit,
+                                      std::uint32_t length)
+{
+    const std::uint8_t* next = payloadEnd;
+    if ((length & 1U) != 0 && next < limit)
+    {
+        ++next;
+    }
+    return next;
+}
+
+inline std::size_t offset_of(std::span<const std::uint8_t> xmi, const std::uint8_t* cursor)
+{
+    return static_cast<std::size_t>(cursor - xmi.data());
+}
+
+inline void scan_form_xmid(std::span<const std::uint8_t> xmi, const std::uint8_t* chunkStart,
+                           const std::uint8_t* payload, const std::uint8_t* chunkEnd,
+                           std::uint32_t length, std::vector<sequence_info>& sequences)
+{
+    if (length < 4)
+    {
+        throw std::runtime_error("Invalid XMI: FORM chunk is too small");
+    }
+
+    if (!has_tag(payload, chunkEnd, "XMID"))
+    {
+        return;
+    }
+
+    sequence_info info{};
+    info.index = sequences.size();
+    info.form_offset = offset_of(xmi, chunkStart);
+    info.form_size = static_cast<std::size_t>(8) + length;
+
+    const std::uint8_t* local = payload + 4;
+    while (local < chunkEnd)
+    {
+        need_bytes(local, chunkEnd, 8, "sequence chunk header");
+        const bool isTimb = has_tag(local, chunkEnd, "TIMB");
+        const bool isRbrn = has_tag(local, chunkEnd, "RBRN");
+        const bool isEvnt = has_tag(local, chunkEnd, "EVNT");
+        local += 4;
+        const std::uint32_t localLength = read_be32(local, chunkEnd);
+        const std::uint8_t* const localPayload = local;
+        const std::uint8_t* const localEnd =
+            chunk_payload_end(localPayload, chunkEnd, localLength, "sequence chunk");
+
+        if (isTimb)
+        {
+            info.has_timb = true;
+        }
+        else if (isRbrn)
+        {
+            info.has_rbrn = true;
+        }
+        else if (isEvnt)
+        {
+            info.event_offset = offset_of(xmi, localPayload);
+            info.event_size = localLength;
+        }
+
+        local = next_chunk(localEnd, chunkEnd, localLength);
+    }
+
+    if (info.event_size == 0)
+    {
+        throw std::runtime_error("Invalid XMI: FORM XMID is missing EVNT chunk");
+    }
+
+    sequences.push_back(info);
+}
+
+inline void scan_catalog_xmid(std::span<const std::uint8_t> xmi, const std::uint8_t* payload,
+                              const std::uint8_t* chunkEnd, std::uint32_t length,
+                              std::vector<sequence_info>& sequences)
+{
+    if (length < 4)
+    {
+        throw std::runtime_error("Invalid XMI: CAT chunk is too small");
+    }
+
+    if (!has_tag(payload, chunkEnd, "XMID"))
+    {
+        return;
+    }
+
+    const std::uint8_t* child = payload + 4;
+    while (child < chunkEnd)
+    {
+        need_bytes(child, chunkEnd, 8, "CAT child chunk header");
+        const std::uint8_t* const childStart = child;
+        const bool isForm = has_tag(child, chunkEnd, "FORM");
+        child += 4;
+        const std::uint32_t childLength = read_be32(child, chunkEnd);
+        const std::uint8_t* const childPayload = child;
+        const std::uint8_t* const childEnd =
+            chunk_payload_end(childPayload, chunkEnd, childLength, "CAT child chunk");
+
+        if (isForm)
+        {
+            scan_form_xmid(xmi, childStart, childPayload, childEnd, childLength, sequences);
+        }
+
+        child = next_chunk(childEnd, chunkEnd, childLength);
+    }
+}
+}
+
+inline std::vector<sequence_info> sequence_infos(std::span<const std::uint8_t> xmi)
+{
+    if (xmi.empty())
+    {
+        throw std::runtime_error("Invalid XMI: empty file");
+    }
+
+    std::vector<sequence_info> sequences;
+    const std::uint8_t* root = xmi.data();
+    const std::uint8_t* const end = root + xmi.size();
+
+    while (root < end)
+    {
+        detail::need_bytes(root, end, 8, "root IFF chunk header");
+        const std::uint8_t* const rootStart = root;
+        const bool isForm = detail::has_tag(root, end, "FORM");
+        const bool isCatalog = detail::has_tag(root, end, "CAT ");
+        root += 4;
+        const std::uint32_t rootLength = detail::read_be32(root, end);
+        const std::uint8_t* const rootPayload = root;
+        const std::uint8_t* const rootEnd =
+            detail::chunk_payload_end(rootPayload, end, rootLength, "root IFF chunk");
+
+        if (isForm)
+        {
+            detail::scan_form_xmid(xmi, rootStart, rootPayload, rootEnd, rootLength, sequences);
+        }
+        else if (isCatalog)
+        {
+            detail::scan_catalog_xmid(xmi, rootPayload, rootEnd, rootLength, sequences);
+        }
+
+        root = detail::next_chunk(rootEnd, end, rootLength);
+    }
+
+    if (sequences.empty())
+    {
+        throw std::runtime_error("Invalid XMI: missing FORM XMID sequence");
+    }
+
+    return sequences;
+}
+
+inline std::size_t sequence_count(std::span<const std::uint8_t> xmi)
+{
+    return sequence_infos(xmi).size();
+}
+
+inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi, std::size_t sequenceIndex)
 {
     struct NoteOffEvent
     {
@@ -37,20 +241,14 @@ inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi)
     }
 
     const std::uint8_t* cursor = xmi.data();
-    const std::uint8_t* const end = cursor + xmi.size();
 
     auto need_bytes = [](const std::uint8_t* cursor, const std::uint8_t* end, std::size_t count,
                          std::string_view context)
     {
-        if (count > static_cast<std::size_t>(end - cursor))
+        if (cursor > end || count > static_cast<std::size_t>(end - cursor))
         {
             throw std::runtime_error("Invalid XMI: truncated " + std::string(context));
         }
-    };
-
-    auto has_tag = [](const std::uint8_t* cursor, const std::uint8_t* end, std::string_view tag)
-    {
-        return tag.size() <= static_cast<std::size_t>(end - cursor) && std::equal(tag.begin(), tag.end(), cursor);
     };
 
     auto skip_bytes = [&](const std::uint8_t*& cursor, const std::uint8_t* end, std::size_t count,
@@ -58,17 +256,6 @@ inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi)
     {
         need_bytes(cursor, end, count, context);
         cursor += count;
-    };
-
-    auto read_be32 = [&](const std::uint8_t*& cursor, const std::uint8_t* end) -> std::uint32_t
-    {
-        need_bytes(cursor, end, 4, "32-bit integer");
-        const std::uint32_t value = (static_cast<std::uint32_t>(cursor[0]) << 24) |
-                                    (static_cast<std::uint32_t>(cursor[1]) << 16) |
-                                    (static_cast<std::uint32_t>(cursor[2]) << 8) |
-                                    static_cast<std::uint32_t>(cursor[3]);
-        cursor += 4;
-        return value;
     };
 
     auto append_be32 = [](std::vector<std::uint8_t>& bytes, std::uint32_t value)
@@ -177,132 +364,16 @@ inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi)
         }
     };
 
-    auto chunk_payload_end = [&](const std::uint8_t* payload, const std::uint8_t* limit,
-                                 std::uint32_t length, std::string_view context)
+    const auto sequences = sequence_infos(xmi);
+    if (sequenceIndex >= sequences.size())
     {
-        need_bytes(payload, limit, length, context);
-        return payload + length;
-    };
-
-    auto next_chunk = [&](const std::uint8_t* payloadEnd, const std::uint8_t* limit, std::uint32_t length)
-    {
-        const std::uint8_t* next = payloadEnd;
-        if ((length & 1U) != 0 && next < limit)
-        {
-            ++next;
-        }
-        return next;
-    };
-
-    const std::uint8_t* sequenceStart = nullptr;
-    const std::uint8_t* sequenceEnd = nullptr;
-
-    auto set_sequence_from_form = [&](const std::uint8_t* payload, const std::uint8_t* chunkEnd,
-                                      std::uint32_t length)
-    {
-        if (length < 4)
-        {
-            throw std::runtime_error("Invalid XMI: FORM chunk is too small");
-        }
-
-        if (!has_tag(payload, chunkEnd, "XMID"))
-        {
-            return false;
-        }
-
-        sequenceStart = payload + 4;
-        sequenceEnd = chunkEnd;
-        return true;
-    };
-
-    auto scan_catalog = [&](const std::uint8_t* payload, const std::uint8_t* chunkEnd, std::uint32_t length)
-    {
-        if (length < 4)
-        {
-            throw std::runtime_error("Invalid XMI: CAT chunk is too small");
-        }
-
-        if (!has_tag(payload, chunkEnd, "XMID"))
-        {
-            return false;
-        }
-
-        const std::uint8_t* child = payload + 4;
-        while (child < chunkEnd)
-        {
-            need_bytes(child, chunkEnd, 8, "CAT child chunk header");
-            const bool isForm = has_tag(child, chunkEnd, "FORM");
-            child += 4;
-            const std::uint32_t childLength = read_be32(child, chunkEnd);
-            const std::uint8_t* const childPayload = child;
-            const std::uint8_t* const childEnd =
-                chunk_payload_end(childPayload, chunkEnd, childLength, "CAT child chunk");
-
-            if (isForm && set_sequence_from_form(childPayload, childEnd, childLength))
-            {
-                return true;
-            }
-
-            child = next_chunk(childEnd, chunkEnd, childLength);
-        }
-
-        return false;
-    };
-
-    const std::uint8_t* root = cursor;
-    while (root < end && sequenceStart == nullptr)
-    {
-        need_bytes(root, end, 8, "root IFF chunk header");
-        const bool isForm = has_tag(root, end, "FORM");
-        const bool isCatalog = has_tag(root, end, "CAT ");
-        root += 4;
-        const std::uint32_t rootLength = read_be32(root, end);
-        const std::uint8_t* const rootPayload = root;
-        const std::uint8_t* const rootEnd = chunk_payload_end(rootPayload, end, rootLength, "root IFF chunk");
-
-        if (isForm)
-        {
-            set_sequence_from_form(rootPayload, rootEnd, rootLength);
-        }
-        else if (isCatalog)
-        {
-            scan_catalog(rootPayload, rootEnd, rootLength);
-        }
-
-        root = next_chunk(rootEnd, end, rootLength);
+        throw std::runtime_error("Invalid XMI: sequence index " + std::to_string(sequenceIndex) +
+                                 " is out of range for " + std::to_string(sequences.size()) + " sequence(s)");
     }
 
-    if (sequenceStart == nullptr)
-    {
-        throw std::runtime_error("Invalid XMI: missing FORM XMID sequence");
-    }
-
-    cursor = sequenceStart;
-    const std::uint8_t* eventEnd = nullptr;
-    while (cursor < sequenceEnd)
-    {
-        need_bytes(cursor, sequenceEnd, 8, "sequence chunk header");
-        const bool isEventChunk = has_tag(cursor, sequenceEnd, "EVNT");
-        cursor += 4;
-        const std::uint32_t localLength = read_be32(cursor, sequenceEnd);
-        const std::uint8_t* const localPayload = cursor;
-        const std::uint8_t* const localEnd =
-            chunk_payload_end(localPayload, sequenceEnd, localLength, "sequence chunk");
-
-        if (isEventChunk)
-        {
-            cursor = localPayload;
-            eventEnd = localEnd;
-            break;
-        }
-
-        cursor = next_chunk(localEnd, sequenceEnd, localLength);
-    }
-
-    if (eventEnd == nullptr)
-    {
-        throw std::runtime_error("Invalid XMI: missing EVNT chunk");
-    }
+    const sequence_info& sequence = sequences[sequenceIndex];
+    cursor = xmi.data() + sequence.event_offset;
+    const std::uint8_t* const eventEnd = cursor + sequence.event_size;
 
     std::vector<std::uint8_t> midi;
     midi.reserve((xmi.size() * 2) + TrackDataOffset);
@@ -475,6 +546,25 @@ inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi)
 
     patch_be32(midi, TrackLengthOffset, static_cast<std::uint32_t>(trackLength));
     return midi;
+}
+
+inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi)
+{
+    return convert(xmi, 0);
+}
+
+inline std::vector<std::vector<std::uint8_t>> convert_all(std::span<const std::uint8_t> xmi)
+{
+    const auto sequences = sequence_infos(xmi);
+    std::vector<std::vector<std::uint8_t>> midis;
+    midis.reserve(sequences.size());
+
+    for (const sequence_info& sequence : sequences)
+    {
+        midis.push_back(convert(xmi, sequence.index));
+    }
+
+    return midis;
 }
 }
 

@@ -1,10 +1,9 @@
-2025 Refactor of the original `XMI2MID.EXE` by Markus Hein / Kimio Ito
-
 **Table-of-Contents**
-- [XMI Specifications](#xmi-specifications)
 - [Header Only Implementation](#header-only-implementation)
 - [Build](#build)
 - [Usage](#usage)
+- [XMI Specifications](#xmi-specifications)
+  - [Multiple XMI Songs](#multiple-xmi-songs)
 - [References](#references)
 - [Change Log](#change-log)
   - [2026-04-24](#2026-04-24)
@@ -17,74 +16,6 @@
   - [2015](#2015)
   - [1994](#1994)
 
-# XMI Specifications
-
-XMIDI is the preprocessed MIDI sequence format used by the IBM Audio Interface Library 2.x and later Miles Sound System lineage. The primary source in this repository is John Miles' AIL2 release under [Reference/AIL2](Reference/AIL2), especially [XMIDI.TXT](Reference/AIL2/DOC/XMIDI.TXT), [TOOLS.TXT](Reference/AIL2/DOC/TOOLS.TXT), [API.TXT](Reference/AIL2/DOC/API.TXT), [MIDIFORM.C](Reference/AIL2/MIDIFORM.C), [XPLAY.C](Reference/AIL2/XPLAY.C), and [XMIDI.ASM](Reference/AIL2/XMIDI.ASM). External format summaries agree with the same overall structure [1][2].
-
-XMIDI files are EA IFF-style containers. Chunk tags are four ASCII bytes, chunk lengths are 32-bit big-endian values, and chunk payloads are padded to an even byte boundary when another chunk follows. The AIL-local payload fields inside `INFO`, `TIMB`, and `RBRN` are DOS-native little-endian values in the original MIDIFORM output.
-
-```text
-[ FORM <len> XDIR
-    INFO <len>
-      uint16_le sequence_count
-]
-
-CAT  <len> XMID
-  FORM <len> XMID          ; sequence 0
-    [ TIMB <len> ]         ; required timbres: count, then patch/bank pairs
-    [ RBRN <len> ]         ; branch index table for controller 120
-    EVNT <len>             ; quantized event stream
-  FORM <len> XMID          ; sequence 1, optional
-    ...
-```
-
-`XDIR/INFO` is an application directory, not a playback requirement. The original AIL driver can find sequences by scanning the `CAT XMID` catalog directly, and it also accepts a bare `FORM XMID` image for a one-sequence file.
-
-`EVNT` is the only mandatory local chunk in each `FORM XMID`, and it is written last by MIDIFORM. Its stream is MIDI-like, but not a Standard MIDI `MTrk` stream:
-
-- Delay bytes have the high bit clear. Long XMI delays are a sum of repeated `0x7F` bytes plus the final byte. A zero delay is omitted entirely.
-- MIDI running status is not used, because the high bit distinguishes delay bytes from event status bytes.
-- Channel voice, System Exclusive, and meta events may appear. Standard Note Off events are removed.
-- Note On events carry an extra MIDI variable-length duration after their normal status, note, and velocity bytes. Converters synthesize the matching MIDI Note Off from that duration.
-- MIDIFORM's default quantization is 120 intervals per second. In this project, the emitted MIDI uses 960 PPQN, so one default XMI interval becomes 16 MIDI ticks at 500,000 microseconds per quarter note.
-- Tempo meta-events are preserved. The converter rescales later MIDI deltas against the current tempo so the fixed 120 Hz XMI timing still plays with the same wall-clock duration in a Standard MIDI player.
-
-AIL-specific controllers occupy MIDI Control Change numbers 110 through 120. They are meaningful to an AIL runtime, but most are just normal CC events to a Standard MIDI player.
-
-| Controller | XMIDI meaning |
-| ---------- | ------------- |
-| 110 | Channel Lock |
-| 111 | Channel Lock Protect |
-| 112 | Voice Protect |
-| 113 | Timbre Protect |
-| 114 | Patch Bank Select |
-| 115 | Indirect Controller Prefix |
-| 116 | For Loop |
-| 117 | Next/Break Loop |
-| 118 | Clear Beat/Bar Count |
-| 119 | Callback Trigger |
-| 120 | Sequence Branch Index |
-
-## Multiple XMI Songs
-
-An XMI file can contain multiple songs because `CAT XMID` is a catalog of repeated `FORM XMID` sequence chunks. MIDIFORM creates this directly: it writes `FORM XDIR/INFO`, opens one `CAT XMID`, then appends one `FORM XMID` for each input MIDI file. The AIL API exposes this as a zero-based `sequence_num`; `XPLAY` passes the optional command-line sequence number to `AIL_register_sequence()`, and `XMIDI.ASM::find_seq` scans to the requested Nth `FORM XMID`.
-
-The current CLI and header-only converter still convert the first sequence only. The prepared implementation path is to parse the IFF container once into sequence descriptors, then let callers select the descriptor whose `EVNT` stream should be converted.
-
-For the CLI, I would keep today's behavior as the default and add:
-
-- `--list` to print sequence count and basic chunk sizes.
-- `--sequence N input.xmi output.mid` to convert one zero-based sequence.
-- `--all input.xmi output-directory-or-stem` to write every sequence as separate MIDI files.
-
-For the header API, I would keep `xmi2mid::convert(xmiBytes)` as the sequence-0 convenience function and add explicit multi-song calls later:
-
-- `xmi2mid::sequence_count(xmiBytes)`
-- `xmi2mid::convert(xmiBytes, sequenceIndex)`
-- `xmi2mid::convert_all(xmiBytes)`
-
-That keeps the one-call API simple while giving tools and game extractors deterministic control over multi-song files.
-
 # Header Only Implementation
 
 [xmi2mid.hpp](xmi2mid.hpp) provides the converter as a single-header C++20 API with no command-line handling, file I/O, or console output. Include it, pass a byte span containing an XMI file, and it returns a complete MIDI Format 0 file as bytes.
@@ -96,13 +27,19 @@ That keeps the one-call API simple while giving tools and game extractors determ
 #include <span>
 #include <vector>
 
-std::vector<std::uint8_t> xmiBytes = load_xmi_somehow();
+std::vector<std::uint8_t> xmiBytes = read_binary("Reference/AIL2/DEMO.XMI");
 
 std::vector<std::uint8_t> midiBytes =
     xmi2mid::convert(std::span<const std::uint8_t>{xmiBytes.data(), xmiBytes.size()});
+
+std::vector<std::uint8_t> firstSequence =
+    xmi2mid::convert(std::span<const std::uint8_t>{xmiBytes.data(), xmiBytes.size()}, 0);
+
+std::vector<std::vector<std::uint8_t>> allSequences =
+    xmi2mid::convert_all(std::span<const std::uint8_t>{xmiBytes.data(), xmiBytes.size()});
 ```
 
-The function throws `std::runtime_error` for invalid or truncated XMI data. The returned vector is ready to write directly to a `.mid` file, embed in another asset pipeline, or hand to a MIDI playback library.
+The conversion functions throw `std::runtime_error` for invalid or truncated XMI data. Returned vectors are ready to write directly to `.mid` files, embed in another asset pipeline, or hand to a MIDI playback library.
 
 # Build
 
@@ -138,15 +75,114 @@ macOS:
 
 # Usage
 
-Supply the path to the XMI file as the first argument.
+Convert sequence 0 from `Reference/AIL2/DEMO.XMI`:
 
 ```cmd
-xmi2mid.exe "C:\Path\To\XMI\Input.xmi" "C:\Path\To\XMI\Output.mid"
+xmi2mid.exe Reference\AIL2\DEMO.XMI demo.mid
 ```
 
 ```sh
-./xmi2mid input.xmi output.mid
+./xmi2mid Reference/AIL2/DEMO.XMI demo.mid
 ```
+
+List the XMI sequences:
+
+```cmd
+xmi2mid.exe --list Reference\AIL2\DEMO.XMI
+```
+
+```sh
+./xmi2mid --list Reference/AIL2/DEMO.XMI
+```
+
+Convert one zero-based sequence explicitly:
+
+```cmd
+xmi2mid.exe --sequence 0 Reference\AIL2\DEMO.XMI demo.mid
+```
+
+```sh
+./xmi2mid --sequence 0 Reference/AIL2/DEMO.XMI demo.mid
+```
+
+Convert every sequence to separate files:
+
+```cmd
+xmi2mid.exe --all Reference\AIL2\DEMO.XMI demo
+```
+
+```sh
+./xmi2mid --all Reference/AIL2/DEMO.XMI demo
+```
+
+# XMI Specifications
+
+XMIDI is the preprocessed MIDI sequence format used by the IBM Audio Interface Library 2.x and later Miles Sound System lineage. The primary source in this repository is John Miles' AIL2 release under [Reference/AIL2](Reference/AIL2), especially [XMIDI.TXT](Reference/AIL2/DOC/XMIDI.TXT), [TOOLS.TXT](Reference/AIL2/DOC/TOOLS.TXT), [API.TXT](Reference/AIL2/DOC/API.TXT), [MIDIFORM.C](Reference/AIL2/MIDIFORM.C), [XPLAY.C](Reference/AIL2/XPLAY.C), and [XMIDI.ASM](Reference/AIL2/XMIDI.ASM). External format summaries agree with the same overall structure [1][2].
+
+XMIDI files are EA IFF-style containers. Chunk tags are four ASCII bytes, chunk lengths are 32-bit big-endian values, and chunk payloads are padded to an even byte boundary when another chunk follows. The AIL-local payload fields inside `INFO`, `TIMB`, and `RBRN` are DOS-native little-endian values in the original MIDIFORM output.
+
+```text
+[ FORM <len> XDIR
+    INFO <len>
+      uint16_le sequence_count
+]
+
+CAT  <len> XMID
+  FORM <len> XMID          ; sequence 0
+    [ TIMB <len> ]         ; required timbres: count, then patch/bank pairs
+    [ RBRN <len> ]         ; branch index table for controller 120
+    EVNT <len>             ; quantized event stream
+  FORM <len> XMID          ; sequence 1, optional
+    ...
+```
+
+`XDIR/INFO` is an application directory, not a playback requirement. The original AIL driver can find sequences by scanning the `CAT XMID` catalog directly, and it also accepts a bare `FORM XMID` image for a one-sequence file.
+
+`EVNT` is the only mandatory local chunk in each `FORM XMID`, and it is written last by MIDIFORM. Its stream is MIDI-like, but not a Standard MIDI `MTrk` stream:
+
+- Delay bytes have the high bit clear. Long XMI delays are a sum of repeated `0x7F` bytes plus the final byte. A zero delay is omitted entirely.
+- MIDI running status is not used, because the high bit distinguishes delay bytes from event status bytes.
+- Channel voice, System Exclusive, and meta events may appear. Standard Note Off events are removed.
+- Note On events carry an extra MIDI variable-length duration after their normal status, note, and velocity bytes. Converters synthesize the matching MIDI Note Off from that duration.
+- MIDIFORM's default quantization is 120 intervals per second. In this project, the emitted MIDI uses 960 PPQN, so one default XMI interval becomes 16 MIDI ticks at 500,000 microseconds per quarter note.
+- Tempo meta-events are preserved. The converter rescales later MIDI deltas against the current tempo so the fixed 120 Hz XMI timing still plays with the same wall-clock duration in a Standard MIDI player.
+
+AIL-specific controllers occupy MIDI Control Change numbers 110 through 120. They are meaningful to an AIL runtime, but most are just normal CC events to a Standard MIDI player.
+
+| Controller | XMIDI meaning              |
+| ---------- | -------------------------- |
+| 110        | Channel Lock               |
+| 111        | Channel Lock Protect       |
+| 112        | Voice Protect              |
+| 113        | Timbre Protect             |
+| 114        | Patch Bank Select          |
+| 115        | Indirect Controller Prefix |
+| 116        | For Loop                   |
+| 117        | Next/Break Loop            |
+| 118        | Clear Beat/Bar Count       |
+| 119        | Callback Trigger           |
+| 120        | Sequence Branch Index      |
+
+## Multiple XMI Songs
+
+An XMI file can contain multiple songs because `CAT XMID` is a catalog of repeated `FORM XMID` sequence chunks. MIDIFORM creates this directly: it writes `FORM XDIR/INFO`, opens one `CAT XMID`, then appends one `FORM XMID` for each input MIDI file. The AIL API exposes this as a zero-based `sequence_num`; `XPLAY` passes the optional command-line sequence number to `AIL_register_sequence()`, and `XMIDI.ASM::find_seq` scans to the requested Nth `FORM XMID`.
+
+The converter now parses the IFF container into sequence descriptors before converting. The default conversion path still uses sequence 0, matching the original single-song behavior, but both the CLI and header-only API can list, select, or convert every sequence in a multi-song XMI.
+
+CLI support:
+
+- `--list Reference/AIL2/DEMO.XMI` prints the discovered sequence count and chunk offsets/sizes.
+- `Reference/AIL2/DEMO.XMI demo.mid` converts sequence 0.
+- `--sequence 0 Reference/AIL2/DEMO.XMI demo.mid` converts one zero-based sequence explicitly.
+- `--all Reference/AIL2/DEMO.XMI demo` writes every sequence as separate files such as `demo_00.mid`, `demo_01.mid`, and so on.
+
+Header API support:
+
+- `xmi2mid::sequence_count(xmiBytes)` returns the number of `FORM XMID` sequences.
+- `xmi2mid::sequence_infos(xmiBytes)` returns offsets, sizes, and `TIMB`/`RBRN` presence for each sequence.
+- `xmi2mid::convert(xmiBytes)` converts sequence 0.
+- `xmi2mid::convert(xmiBytes, sequenceIndex)` converts one zero-based sequence.
+- `xmi2mid::convert_all(xmiBytes)` returns one MIDI byte vector per sequence.
 
 # References
 
@@ -181,7 +217,7 @@ xmi2mid.exe "C:\Path\To\XMI\Input.xmi" "C:\Path\To\XMI\Output.mid"
 - Preserved end-of-track flushing of pending note-off events.
 - Consolidated channel event size handling into a small helper.
 - Added `read_file` and `write_file` helpers with checked binary I/O.
-- Kept the command-line interface as `input.xmi output.mid`.
+- Kept the command-line interface as two explicit paths.
 - Removed reliance on Visual Studio solution and project files for building.
 - Removed remaining `.sln`, `.vcxproj`, `.vcxproj.filters`, and `.vcxproj.user` files from the active tree.
 - Verified a minimal synthetic XMI can be converted to a valid minimal MIDI header and track.
@@ -223,7 +259,7 @@ The 2025 version was the first real architectural cleanup after the 2023 lift. W
 - Split the converter into a dedicated `xmiConverter` function instead of keeping the whole program inside `main`.
 - Changed the converter boundary from "open a file and write a sibling `.mid`" to "accept XMI bytes and return MIDI bytes."
 - Let `main` own the command-line contract, input file read, output file write, and user-facing error messages.
-- Changed the CLI from the 2023 one-argument form to an explicit two-path form: `<input.xmi> <output.mid>`.
+- Changed the CLI from the 2023 one-argument form to an explicit two-path form.
 - Made the output path user-controlled instead of always deriving it from the input filename.
 - Kept the core XMI event algorithm from 2023 intact: header skip, optional branch skip, event decode, pending note-off queue, timing rescale, tempo tracking, and MIDI track writing.
 - Kept the two-buffer conversion model from 2023: one intermediate decoded event buffer and one final MIDI track buffer.
