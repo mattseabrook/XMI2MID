@@ -5,7 +5,6 @@
 - [XMI Specifications](#xmi-specifications)
   - [Multiple XMI Songs](#multiple-xmi-songs)
 - [References](#references)
-- [Changelog](ChangeLog.md)
 
 # Usage
 
@@ -105,8 +104,9 @@ The conversion functions throw `std::runtime_error` for invalid or truncated XMI
 
 # Build
 
-Run `./build.sh` from the repository root to build for the host, or select a
-target explicitly. On Windows, run the script in Git Bash, MSYS2, or Cygwin.
+On Linux or macOS, run `./build.sh all` from the repository root to build all
+three executables with the toolchains below. Run `./build.sh` for a host build,
+or select a target explicitly.
 
 | Command | Output |
 | --- | --- |
@@ -121,12 +121,11 @@ Set `XMI2MID_OUTPUT_DIR` to write the executables outside the repository root.
 Set `CXXFLAGS` and `LDFLAGS` to add compiler and linker flags for the selected
 toolchain.
 
-- **Linux** uses a C++23 compiler. Set `CXX_LINUX` or `CXX` to select a compiler.
+- **Linux** uses a C++20 compiler. Set `CXX_LINUX` or `CXX` to select a compiler.
   From another host, set `CXX_LINUX` to a configured Linux cross compiler and
   `LINUX_SYSROOT` if it needs a separate sysroot.
-- **Windows** uses `clang-cl`, `lld-link`, and the Microsoft C++ SDK and static
-  CRT. On Windows, use an x64 Visual Studio developer environment. For
-  cross-builds, the script checks `WINSDK_BASE`, `/opt/winsdk`, the v64tng cache,
+- **Windows** uses LLVM's `clang-cl` and `lld-link` with the Microsoft C++ SDK
+  and static CRT. The script checks `WINSDK_BASE`, `/opt/winsdk`, the v64tng cache,
   and the XMI2MID cache. Use `xwin splat --output <directory>` to provision the
   SDK if needed, and set `WINSDK_BASE` to that directory. Set `MSVC_INCLUDE` if
   the Microsoft STL headers are installed separately.

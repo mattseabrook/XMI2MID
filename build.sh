@@ -52,14 +52,14 @@ publish() {
 
 build_linux() {
     local compiler="${CXX_LINUX:-${CXX:-}}"
-    local flags=(-std=c++23 -O3 -DNDEBUG -Wall -Wextra -Wpedantic)
+    local flags=(-std=c++20 -O3 -DNDEBUG -Wall -Wextra -Wpedantic)
     [[ "$native_target" == linux || -n "${CXX_LINUX:-}" ]] ||
         die 'Cross-Linux builds require CXX_LINUX and a Linux toolchain/sysroot.'
     if [[ -z "$compiler" ]]; then
         compiler="$(command -v c++ || command -v g++ || command -v clang++)" ||
-            die 'Install a C++23 compiler or set CXX_LINUX.'
+            die 'Install a C++20 compiler or set CXX_LINUX.'
     fi
-    require_tool "$compiler" 'Install a C++23 compiler and Linux development headers.'
+    require_tool "$compiler" 'Install a C++20 compiler and Linux development headers.'
     if [[ -n "${LINUX_SYSROOT:-}" ]]; then flags+=("--sysroot=$LINUX_SYSROOT"); fi
 
     "$compiler" "${flags[@]}" ${extra_cxxflags[@]+"${extra_cxxflags[@]}"} \
@@ -133,7 +133,7 @@ build_windows() {
     (
         cd -- "$build_dir"
         local target=--target=x86_64-pc-windows-msvc
-        clang-cl "$target" /c /std:c++latest /EHsc /MT /O2 /DNDEBUG /W4 /utf-8 \
+        clang-cl "$target" /c /std:c++20 /EHsc /MT /O2 /DNDEBUG /W4 /utf-8 \
             ${windows_includes[@]+"${windows_includes[@]}"} ${extra_cxxflags[@]+"${extra_cxxflags[@]}"} \
             -o xmi2mid.obj -- "$(windows_path "$source_file")"
         clang-cl "$target" -fuse-ld=lld-link xmi2mid.obj -o xmi2mid.exe /link \

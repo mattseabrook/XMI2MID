@@ -36,20 +36,21 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <set>
 #include <span>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace
@@ -89,20 +90,30 @@ std::vector<std::uint8_t> read_file(const std::filesystem::path& path)
     return bytes;
 }
 
-void write_file(const std::filesystem::path& path, std::span<const std::uint8_t> bytes)
+void write_conversion(const std::filesystem::path& inputPath, const std::filesystem::path& outputPath,
+                      std::span<const std::uint8_t> midiData, std::size_t index)
 {
-    std::ofstream file(path, std::ios::binary);
+    std::ofstream file(outputPath, std::ios::binary);
     if (!file)
     {
-        throw std::runtime_error("Cannot open output file " + path.string());
+        throw std::runtime_error("Cannot open output file " + outputPath.string());
     }
 
-    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    file.write(reinterpret_cast<const char*>(midiData.data()), static_cast<std::streamsize>(midiData.size()));
     file.close();
     if (!file)
     {
-        throw std::runtime_error("Cannot write output file " + path.string());
+        throw std::runtime_error("Cannot write output file " + outputPath.string());
     }
+    std::cout << "Converted sequence " << index << " from "
+              << inputPath.string() << " to " << outputPath.string() << '\n';
+}
+
+void convert_file(const std::filesystem::path& inputPath, const std::filesystem::path& outputPath,
+                  std::size_t index)
+{
+    const auto xmiData = read_file(inputPath);
+    write_conversion(inputPath, outputPath, xmi2mid::convert(xmiData, index), index);
 }
 
 std::size_t parse_sequence_index(std::string_view text)
@@ -158,6 +169,11 @@ bool is_option(std::string_view text)
 
 BatchOptions parse_batch_options(int argc, char* argv[])
 {
+    using LongOption = std::pair<std::string_view, std::string_view>;
+    constexpr LongOption longOptions[]{
+        {"--sequence", "s"}, {"--output-directory", "d"}, {"--list", "l"},
+        {"--recursive", "r"}, {"--help", "h"}
+    };
     BatchOptions options;
     bool endOfOptions = false;
     for (int i = 1; i < argc; ++i)
@@ -173,6 +189,11 @@ BatchOptions parse_batch_options(int argc, char* argv[])
             endOfOptions = true;
             continue;
         }
+        if (arg == "--all")
+        {
+            select_sequences(options, {});
+            continue;
+        }
 
         std::string_view flags = arg.substr(1);
         std::string_view value;
@@ -180,35 +201,13 @@ BatchOptions parse_batch_options(int argc, char* argv[])
         {
             const auto separator = arg.find('=');
             const auto name = arg.substr(0, separator);
-            if (name == "--sequence")
-            {
-                flags = "s";
-            }
-            else if (name == "--output-directory")
-            {
-                flags = "d";
-            }
-            else if (arg == "--list")
-            {
-                flags = "l";
-            }
-            else if (arg == "--recursive")
-            {
-                flags = "r";
-            }
-            else if (arg == "--help")
-            {
-                flags = "h";
-            }
-            else if (arg == "--all")
-            {
-                select_sequences(options, {});
-                continue;
-            }
-            else
+            const auto* option = std::ranges::find(longOptions, name, &LongOption::first);
+            if (option == std::end(longOptions) ||
+                (separator != std::string_view::npos && name != "--sequence" && name != "--output-directory"))
             {
                 throw std::runtime_error("Unknown option " + std::string(arg));
             }
+            flags = option->second;
 
             if (separator != std::string_view::npos)
             {
@@ -271,25 +270,33 @@ BatchOptions parse_batch_options(int argc, char* argv[])
     return options;
 }
 
-std::string sequence_suffix(std::size_t index, std::size_t count)
+struct SequencePaths
 {
-    const std::size_t width = std::max<std::size_t>(2, std::to_string(count == 0 ? 0 : count - 1).size());
-    std::ostringstream suffix;
-    suffix << std::setfill('0') << std::setw(static_cast<int>(width)) << index;
-    return suffix.str();
-}
+    std::filesystem::path prefix;
+    std::filesystem::path extension;
+    std::size_t width;
 
-std::filesystem::path sequence_output_path(const std::filesystem::path& inputPath,
-                                           const std::filesystem::path& outputTarget,
-                                           std::size_t index,
-                                           std::size_t count)
+    std::filesystem::path operator()(std::size_t index) const
+    {
+        auto number = std::to_string(index);
+        if (number.size() < width)
+        {
+            number.insert(0, width - number.size(), '0');
+        }
+        auto path = prefix;
+        path += "_" + number;
+        path += extension;
+        return path;
+    }
+};
+
+SequencePaths sequence_paths(const std::filesystem::path& inputPath,
+                             const std::filesystem::path& outputTarget, std::size_t count)
 {
-    const std::string suffix = sequence_suffix(index, count);
+    const auto width = std::max<std::size_t>(2, std::to_string(count - 1).size());
     if (std::filesystem::is_directory(outputTarget))
     {
-        auto filename = inputPath.stem();
-        filename += "_" + suffix + ".mid";
-        return outputTarget / filename;
+        return {outputTarget / inputPath.stem(), ".mid", width};
     }
 
     std::filesystem::path extension = outputTarget.extension();
@@ -304,17 +311,7 @@ std::filesystem::path sequence_output_path(const std::filesystem::path& inputPat
         stem = inputPath.stem();
     }
 
-    stem += "_" + suffix;
-    stem += extension;
-    return outputTarget.parent_path() / stem;
-}
-
-void write_conversion(const std::filesystem::path& inputPath, const std::filesystem::path& outputPath,
-                      std::span<const std::uint8_t> midiData, std::size_t index)
-{
-    write_file(outputPath, midiData);
-    std::cout << "Converted sequence " << index << " from "
-              << inputPath.string() << " to " << outputPath.string() << '\n';
+    return {outputTarget.parent_path() / stem, extension, width};
 }
 
 void print_sequence_list(const std::filesystem::path& inputPath, const std::vector<xmi2mid::sequence_info>& sequences)
@@ -345,12 +342,12 @@ std::vector<std::filesystem::path> collect_input_files(const BatchOptions& optio
         }
         else if (std::filesystem::is_directory(status))
         {
-            std::vector<std::filesystem::path> entries;
+            const auto first = static_cast<std::ptrdiff_t>(files.size());
             auto add_file = [&](const std::filesystem::directory_entry& entry)
             {
                 if (entry.is_regular_file())
                 {
-                    entries.push_back(entry.path());
+                    files.push_back(entry.path());
                 }
             };
 
@@ -375,8 +372,7 @@ std::vector<std::filesystem::path> collect_input_files(const BatchOptions& optio
                     add_file(entry);
                 }
             }
-            std::sort(entries.begin(), entries.end());
-            files.insert(files.end(), entries.begin(), entries.end());
+            std::sort(files.begin() + first, files.end());
         }
         else
         {
@@ -450,9 +446,11 @@ int run_batch(const BatchOptions& options, const std::filesystem::path& sourceDi
                 }
             }
 
+            std::filesystem::create_directories(outputDirectory);
+            const auto paths = sequence_paths(inputPath, outputDirectory, sequences.size());
             const auto write_sequence = [&](std::span<const std::uint8_t> midiData, std::size_t index)
             {
-                const auto outputPath = sequence_output_path(inputPath, outputDirectory, index, sequences.size());
+                const auto outputPath = paths(index);
                 if (!writtenOutputs.insert(std::filesystem::weakly_canonical(outputPath)).second)
                 {
                     throw std::runtime_error("Multiple inputs produce " + outputPath.string());
@@ -461,10 +459,9 @@ int run_batch(const BatchOptions& options, const std::filesystem::path& sourceDi
                 ++outputCount;
             };
 
-            std::filesystem::create_directories(outputDirectory);
             if (options.all)
             {
-                const auto midiFiles = xmi2mid::convert_all(xmiData);
+                const auto midiFiles = xmi2mid::detail::convert_sequences(xmiData, sequences);
                 for (std::size_t index = 0; index < midiFiles.size(); ++index)
                 {
                     write_sequence(midiFiles[index], index);
@@ -472,8 +469,9 @@ int run_batch(const BatchOptions& options, const std::filesystem::path& sourceDi
             }
             else
             {
-                const auto midiData = xmi2mid::convert(xmiData, *options.sequenceIndex);
-                write_sequence(midiData, *options.sequenceIndex);
+                const auto index = *options.sequenceIndex;
+                xmi2mid::detail::check_sequence_index(index, sequences.size());
+                write_sequence(xmi2mid::detail::convert_sequence(xmiData, sequences[index]), index);
             }
         }
         catch (const std::runtime_error& error)
@@ -541,11 +539,7 @@ int main(int argc, char* argv[])
             !is_option(argv[3]) && !is_option(argv[4]))
         {
             const std::size_t sequenceIndex = parse_sequence_index(argv[2]);
-            const std::filesystem::path inputPath = argv[3];
-            const std::filesystem::path outputPath = argv[4];
-            const auto xmiData = read_file(inputPath);
-            const auto midiData = xmi2mid::convert(xmiData, sequenceIndex);
-            write_conversion(inputPath, outputPath, midiData, sequenceIndex);
+            convert_file(argv[3], argv[4], sequenceIndex);
             return 0;
         }
 
@@ -565,23 +559,18 @@ int main(int argc, char* argv[])
 
             const auto xmiData = read_file(inputPath);
             const auto midiFiles = xmi2mid::convert_all(xmiData);
+            const auto paths = sequence_paths(inputPath, outputTarget, midiFiles.size());
 
             for (std::size_t index = 0; index < midiFiles.size(); ++index)
             {
-                const std::filesystem::path outputPath =
-                    sequence_output_path(inputPath, outputTarget, index, midiFiles.size());
-                write_conversion(inputPath, outputPath, midiFiles[index], index);
+                write_conversion(inputPath, paths(index), midiFiles[index], index);
             }
             return 0;
         }
 
         if (argc == 3 && !is_option(command) && !is_option(argv[2]))
         {
-            const std::filesystem::path inputPath = argv[1];
-            const std::filesystem::path outputPath = argv[2];
-            const auto xmiData = read_file(inputPath);
-            const auto midiData = xmi2mid::convert(xmiData);
-            write_conversion(inputPath, outputPath, midiData, 0);
+            convert_file(argv[1], argv[2], 0);
             return 0;
         }
 

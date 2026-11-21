@@ -30,522 +30,409 @@ namespace detail
 inline void need_bytes(const std::uint8_t* cursor, const std::uint8_t* end, std::size_t count,
                        std::string_view context)
 {
-    if (cursor > end || count > static_cast<std::size_t>(end - cursor))
+    if (count > static_cast<std::size_t>(end - cursor))
     {
         throw std::runtime_error("Invalid XMI: truncated " + std::string(context));
     }
 }
 
-inline bool has_tag(const std::uint8_t* cursor, const std::uint8_t* end, std::string_view tag)
+inline std::string_view fourcc(const std::uint8_t* bytes)
 {
-    return cursor <= end && tag.size() <= static_cast<std::size_t>(end - cursor) &&
-           std::equal(tag.begin(), tag.end(), cursor);
+    return {reinterpret_cast<const char*>(bytes), 4};
 }
 
-inline std::uint32_t read_be32(const std::uint8_t*& cursor, const std::uint8_t* end)
+inline std::uint32_t read_be(const std::uint8_t* bytes, std::size_t count)
 {
-    need_bytes(cursor, end, 4, "32-bit integer");
-    const std::uint32_t value = (static_cast<std::uint32_t>(cursor[0]) << 24) |
-                                (static_cast<std::uint32_t>(cursor[1]) << 16) |
-                                (static_cast<std::uint32_t>(cursor[2]) << 8) |
-                                static_cast<std::uint32_t>(cursor[3]);
-    cursor += 4;
+    std::uint32_t value = 0;
+    for (std::size_t i = 0; i < count; ++i)
+    {
+        value = (value << 8) | bytes[i];
+    }
     return value;
 }
 
-inline const std::uint8_t* chunk_payload_end(const std::uint8_t* payload, const std::uint8_t* limit,
-                                             std::uint32_t length, std::string_view context)
+struct Chunk
 {
-    need_bytes(payload, limit, length, context);
-    return payload + length;
-}
+    std::string_view tag;
+    const std::uint8_t* data;
+    const std::uint8_t* end;
 
-inline const std::uint8_t* next_chunk(const std::uint8_t* payloadEnd, const std::uint8_t* limit,
-                                      std::uint32_t length)
+    std::size_t size() const { return static_cast<std::size_t>(end - data); }
+};
+
+inline Chunk read_chunk(const std::uint8_t*& cursor, const std::uint8_t* end,
+                        std::string_view header, std::string_view payload)
 {
-    const std::uint8_t* next = payloadEnd;
-    if ((length & 1U) != 0 && next < limit)
+    need_bytes(cursor, end, 8, header);
+    const auto tag = fourcc(cursor);
+    const auto length = read_be(cursor + 4, 4);
+    const auto* data = cursor + 8;
+    need_bytes(data, end, length, payload);
+    cursor = data + length;
+    const Chunk chunk{tag, data, cursor};
+    if ((length & 1U) != 0 && cursor < end)
     {
-        ++next;
+        ++cursor;
     }
-    return next;
+    return chunk;
 }
 
-inline std::size_t offset_of(std::span<const std::uint8_t> xmi, const std::uint8_t* cursor)
-{
-    return static_cast<std::size_t>(cursor - xmi.data());
-}
-
-inline void scan_form_xmid(std::span<const std::uint8_t> xmi, const std::uint8_t* chunkStart,
-                           const std::uint8_t* payload, const std::uint8_t* chunkEnd,
-                           std::uint32_t length, std::vector<sequence_info>& sequences)
-{
-    if (length < 4)
-    {
-        throw std::runtime_error("Invalid XMI: FORM chunk is too small");
-    }
-
-    if (!has_tag(payload, chunkEnd, "XMID"))
-    {
-        return;
-    }
-
-    sequence_info info{};
-    info.index = sequences.size();
-    info.form_offset = offset_of(xmi, chunkStart);
-    info.form_size = static_cast<std::size_t>(8) + length;
-
-    const std::uint8_t* local = payload + 4;
-    while (local < chunkEnd)
-    {
-        need_bytes(local, chunkEnd, 8, "sequence chunk header");
-        const bool isTimb = has_tag(local, chunkEnd, "TIMB");
-        const bool isRbrn = has_tag(local, chunkEnd, "RBRN");
-        const bool isEvnt = has_tag(local, chunkEnd, "EVNT");
-        local += 4;
-        const std::uint32_t localLength = read_be32(local, chunkEnd);
-        const std::uint8_t* const localPayload = local;
-        const std::uint8_t* const localEnd =
-            chunk_payload_end(localPayload, chunkEnd, localLength, "sequence chunk");
-
-        if (isTimb)
-        {
-            info.has_timb = true;
-        }
-        else if (isRbrn)
-        {
-            info.has_rbrn = true;
-        }
-        else if (isEvnt)
-        {
-            info.event_offset = offset_of(xmi, localPayload);
-            info.event_size = localLength;
-        }
-
-        local = next_chunk(localEnd, chunkEnd, localLength);
-    }
-
-    if (info.event_size == 0)
-    {
-        throw std::runtime_error("Invalid XMI: FORM XMID is missing EVNT chunk");
-    }
-
-    sequences.push_back(info);
-}
-
-inline void scan_catalog_xmid(std::span<const std::uint8_t> xmi, const std::uint8_t* payload,
-                              const std::uint8_t* chunkEnd, std::uint32_t length,
-                              std::vector<sequence_info>& sequences)
-{
-    if (length < 4)
-    {
-        throw std::runtime_error("Invalid XMI: CAT chunk is too small");
-    }
-
-    if (!has_tag(payload, chunkEnd, "XMID"))
-    {
-        return;
-    }
-
-    const std::uint8_t* child = payload + 4;
-    while (child < chunkEnd)
-    {
-        need_bytes(child, chunkEnd, 8, "CAT child chunk header");
-        const std::uint8_t* const childStart = child;
-        const bool isForm = has_tag(child, chunkEnd, "FORM");
-        child += 4;
-        const std::uint32_t childLength = read_be32(child, chunkEnd);
-        const std::uint8_t* const childPayload = child;
-        const std::uint8_t* const childEnd =
-            chunk_payload_end(childPayload, chunkEnd, childLength, "CAT child chunk");
-
-        if (isForm)
-        {
-            scan_form_xmid(xmi, childStart, childPayload, childEnd, childLength, sequences);
-        }
-
-        child = next_chunk(childEnd, chunkEnd, childLength);
-    }
-}
-}
-
-inline std::vector<sequence_info> sequence_infos(std::span<const std::uint8_t> xmi)
+template <typename Visitor>
+inline std::size_t scan_sequences(std::span<const std::uint8_t> xmi, Visitor visit)
 {
     if (xmi.empty())
     {
         throw std::runtime_error("Invalid XMI: empty file");
     }
 
-    std::vector<sequence_info> sequences;
-    const std::uint8_t* root = xmi.data();
-    const std::uint8_t* const end = root + xmi.size();
+    std::size_t count = 0;
+    const auto scan_form = [&](const Chunk& form)
+    {
+        if (form.size() < 4)
+        {
+            throw std::runtime_error("Invalid XMI: FORM chunk is too small");
+        }
+        if (fourcc(form.data) != "XMID")
+        {
+            return;
+        }
 
+        sequence_info info{};
+        info.index = count;
+        info.form_offset = static_cast<std::size_t>((form.data - 8) - xmi.data());
+        info.form_size = 8 + form.size();
+        const auto* local = form.data + 4;
+        while (local < form.end)
+        {
+            const auto chunk = read_chunk(local, form.end, "sequence chunk header", "sequence chunk");
+            if (chunk.tag == "TIMB")
+            {
+                info.has_timb = true;
+            }
+            else if (chunk.tag == "RBRN")
+            {
+                info.has_rbrn = true;
+            }
+            else if (chunk.tag == "EVNT")
+            {
+                info.event_offset = static_cast<std::size_t>(chunk.data - xmi.data());
+                info.event_size = chunk.size();
+            }
+        }
+        if (info.event_size == 0)
+        {
+            throw std::runtime_error("Invalid XMI: FORM XMID is missing EVNT chunk");
+        }
+        visit(info);
+        ++count;
+    };
+
+    const auto* root = xmi.data();
+    const auto* end = root + xmi.size();
     while (root < end)
     {
-        detail::need_bytes(root, end, 8, "root IFF chunk header");
-        const std::uint8_t* const rootStart = root;
-        const bool isForm = detail::has_tag(root, end, "FORM");
-        const bool isCatalog = detail::has_tag(root, end, "CAT ");
-        root += 4;
-        const std::uint32_t rootLength = detail::read_be32(root, end);
-        const std::uint8_t* const rootPayload = root;
-        const std::uint8_t* const rootEnd =
-            detail::chunk_payload_end(rootPayload, end, rootLength, "root IFF chunk");
-
-        if (isForm)
+        const auto chunk = read_chunk(root, end, "root IFF chunk header", "root IFF chunk");
+        if (chunk.tag == "FORM")
         {
-            detail::scan_form_xmid(xmi, rootStart, rootPayload, rootEnd, rootLength, sequences);
+            scan_form(chunk);
         }
-        else if (isCatalog)
+        else if (chunk.tag == "CAT ")
         {
-            detail::scan_catalog_xmid(xmi, rootPayload, rootEnd, rootLength, sequences);
-        }
+            if (chunk.size() < 4)
+            {
+                throw std::runtime_error("Invalid XMI: CAT chunk is too small");
+            }
+            if (fourcc(chunk.data) != "XMID")
+            {
+                continue;
+            }
 
-        root = detail::next_chunk(rootEnd, end, rootLength);
+            const auto* child = chunk.data + 4;
+            while (child < chunk.end)
+            {
+                const auto form = read_chunk(child, chunk.end, "CAT child chunk header", "CAT child chunk");
+                if (form.tag == "FORM")
+                {
+                    scan_form(form);
+                }
+            }
+        }
     }
-
-    if (sequences.empty())
+    if (count == 0)
     {
         throw std::runtime_error("Invalid XMI: missing FORM XMID sequence");
     }
-
-    return sequences;
+    return count;
 }
 
-inline std::size_t sequence_count(std::span<const std::uint8_t> xmi)
+inline void check_sequence_index(std::size_t index, std::size_t count)
 {
-    return sequence_infos(xmi).size();
+    if (index >= count)
+    {
+        throw std::runtime_error("Invalid XMI: sequence index " + std::to_string(index) +
+                                 " is out of range for " + std::to_string(count) + " sequence(s)");
+    }
 }
 
-inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi, std::size_t sequenceIndex)
+inline std::uint32_t read_varlen(const std::uint8_t*& cursor, const std::uint8_t* end)
+{
+    std::uint32_t value = 0;
+    for (int byteCount = 0; byteCount < 5; ++byteCount)
+    {
+        need_bytes(cursor, end, 1, "variable-length integer");
+        const std::uint8_t byte = *cursor++;
+        value = (value << 7) | (byte & 0x7F);
+        if ((byte & 0x80) == 0)
+        {
+            return value;
+        }
+    }
+    throw std::runtime_error("Invalid XMI: variable-length integer is too large");
+}
+
+inline std::size_t channel_event_size(std::uint8_t status)
+{
+    switch (status & 0xF0)
+    {
+    case 0x80:
+    case 0x90:
+    case 0xA0:
+    case 0xB0:
+    case 0xE0:
+        return 3;
+    case 0xC0:
+    case 0xD0:
+        return 2;
+    default:
+        return 0;
+    }
+}
+
+inline std::vector<std::uint8_t> convert_sequence(std::span<const std::uint8_t> xmi,
+                                                  const sequence_info& sequence)
 {
     struct NoteOffEvent
     {
-        std::uint32_t delta = 0;
-        std::uint8_t status = 0;
-        std::uint8_t note = 0;
+        std::uint64_t tick;
+        std::uint32_t order;
+        std::uint8_t status;
+        std::uint8_t note;
     };
 
     constexpr std::size_t MaxNoteOffs = 1000;
     constexpr std::uint32_t DefaultTempo = 120;
     constexpr std::uint32_t XmiFreq = 120;
-    constexpr std::uint32_t DefaultTimebase = XmiFreq * 60 / DefaultTempo;
     constexpr std::uint32_t DefaultQuarterNoteMicros = 60 * 1'000'000 / DefaultTempo;
     constexpr std::uint16_t MidiTimebase = 960;
+    constexpr std::uint32_t TickScale = MidiTimebase / (XmiFreq * 60 / DefaultTempo);
     constexpr std::size_t TrackLengthOffset = 18;
-    constexpr std::size_t TrackDataOffset = 22;
-
-    if (xmi.empty())
-    {
-        throw std::runtime_error("Invalid XMI: empty file");
-    }
-
-    const std::uint8_t* cursor = xmi.data();
-
-    auto need_bytes = [](const std::uint8_t* cursor, const std::uint8_t* end, std::size_t count,
-                         std::string_view context)
-    {
-        if (cursor > end || count > static_cast<std::size_t>(end - cursor))
-        {
-            throw std::runtime_error("Invalid XMI: truncated " + std::string(context));
-        }
+    constexpr std::array<std::uint8_t, 22> MidiHeader{
+        'M', 'T', 'h', 'd', 0, 0, 0, 6, 0, 0, 0, 1,
+        static_cast<std::uint8_t>(MidiTimebase >> 8), static_cast<std::uint8_t>(MidiTimebase),
+        'M', 'T', 'r', 'k', 0, 0, 0, 0
     };
 
-    auto skip_bytes = [&](const std::uint8_t*& cursor, const std::uint8_t* end, std::size_t count,
-                          std::string_view context)
+    const auto events = xmi.subspan(sequence.event_offset, sequence.event_size);
+    const auto* cursor = events.data();
+    const auto* const eventEnd = cursor + events.size();
+    std::vector<std::uint8_t> midi;
+    const auto inputSize = std::min(events.size(), (midi.max_size() - MidiHeader.size()) / 2);
+    midi.reserve(MidiHeader.size() + 2 * inputSize);
+    midi.insert(midi.end(), MidiHeader.begin(), MidiHeader.end());
+
+    std::array<NoteOffEvent, MaxNoteOffs> noteOffs;
+    auto first = noteOffs.begin();
+    auto last = first;
+    std::uint64_t tick = 0;
+    std::uint32_t noteOrder = 0;
+    std::uint32_t quarterNoteMicros = DefaultQuarterNoteMicros;
+    bool expectDelta = true;
+
+    // Keep the order in which notes started when their end ticks match.
+    const auto later = [](const NoteOffEvent& left, const NoteOffEvent& right)
     {
-        need_bytes(cursor, end, count, context);
-        cursor += count;
+        return left.tick != right.tick ? left.tick > right.tick : left.order > right.order;
     };
 
-    auto append_be32 = [](std::vector<std::uint8_t>& bytes, std::uint32_t value)
+    const auto append_delta = [&](std::uint32_t delta)
     {
-        bytes.push_back(static_cast<std::uint8_t>(value >> 24));
-        bytes.push_back(static_cast<std::uint8_t>(value >> 16));
-        bytes.push_back(static_cast<std::uint8_t>(value >> 8));
-        bytes.push_back(static_cast<std::uint8_t>(value));
-    };
-
-    auto patch_be32 = [](std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t value)
-    {
-        bytes[offset] = static_cast<std::uint8_t>(value >> 24);
-        bytes[offset + 1] = static_cast<std::uint8_t>(value >> 16);
-        bytes[offset + 2] = static_cast<std::uint8_t>(value >> 8);
-        bytes[offset + 3] = static_cast<std::uint8_t>(value);
-    };
-
-    auto read_varlen = [&](const std::uint8_t*& cursor, const std::uint8_t* end) -> std::uint32_t
-    {
-        std::uint32_t value = 0;
-        for (int byteCount = 0; byteCount < 5; ++byteCount)
-        {
-            need_bytes(cursor, end, 1, "variable-length integer");
-            const std::uint8_t byte = *cursor++;
-            value = (value << 7) | (byte & 0x7F);
-            if ((byte & 0x80) == 0)
-            {
-                return value;
-            }
-        }
-        throw std::runtime_error("Invalid XMI: variable-length integer is too large");
-    };
-
-    auto append_varlen = [](std::vector<std::uint8_t>& bytes, std::uint32_t value)
-    {
-        std::array<std::uint8_t, 5> encoded{};
-        std::size_t count = 0;
-        encoded[count++] = static_cast<std::uint8_t>(value & 0x7F);
-
-        while ((value >>= 7) != 0)
-        {
-            encoded[count++] = static_cast<std::uint8_t>((value & 0x7F) | 0x80);
-        }
-
-        while (count != 0)
-        {
-            bytes.push_back(encoded[--count]);
-        }
-    };
-
-    auto read_xmi_delta = [&](const std::uint8_t*& cursor, const std::uint8_t* end) -> std::uint32_t
-    {
-        std::uint32_t delay = 0;
-        while (cursor != end && *cursor == 0x7F)
-        {
-            delay += *cursor++;
-        }
-
-        need_bytes(cursor, end, 1, "XMI delta");
-        return delay + *cursor++;
-    };
-
-    auto scale_delta = [](std::uint32_t delta, std::uint32_t quarterNoteMicros) -> std::uint32_t
-    {
-        const std::uint64_t denominator = static_cast<std::uint64_t>(quarterNoteMicros) * DefaultTimebase;
-        if (denominator == 0)
+        if (quarterNoteMicros == 0)
         {
             throw std::runtime_error("Invalid MIDI tempo: zero quarter-note length");
         }
 
-        const std::uint64_t numerator =
-            static_cast<std::uint64_t>(delta) * MidiTimebase * DefaultQuarterNoteMicros;
-        return static_cast<std::uint32_t>((numerator + denominator / 2) / denominator);
-    };
-
-    auto append_scaled_delta = [&](std::vector<std::uint8_t>& midi, std::uint32_t delta,
-                                   std::uint32_t quarterNoteMicros)
-    {
-        append_varlen(midi, scale_delta(delta, quarterNoteMicros));
-    };
-
-    auto append_bytes = [&](std::vector<std::uint8_t>& midi, const std::uint8_t*& cursor,
-                            const std::uint8_t* end, std::size_t count)
-    {
-        need_bytes(cursor, end, count, "event payload");
-        midi.insert(midi.end(), cursor, cursor + count);
-        cursor += count;
-    };
-
-    auto channel_event_size = [](std::uint8_t status) -> std::size_t
-    {
-        switch (status & 0xF0)
+        std::uint32_t value = delta * TickScale;
+        if (quarterNoteMicros != DefaultQuarterNoteMicros)
         {
-        case 0x80:
-        case 0x90:
-        case 0xA0:
-        case 0xB0:
-        case 0xE0:
-            return 3;
-        case 0xC0:
-        case 0xD0:
-            return 2;
-        default:
-            return 0;
+            const auto numerator = static_cast<std::uint64_t>(delta) * TickScale * DefaultQuarterNoteMicros;
+            value = static_cast<std::uint32_t>((numerator + quarterNoteMicros / 2) / quarterNoteMicros);
         }
+        if (value < 0x80)
+        {
+            midi.push_back(static_cast<std::uint8_t>(value));
+            return;
+        }
+
+        std::array<std::uint8_t, 5> encoded;
+        auto digit = encoded.end();
+        *--digit = static_cast<std::uint8_t>(value & 0x7F);
+        while ((value >>= 7) != 0)
+        {
+            *--digit = static_cast<std::uint8_t>((value & 0x7F) | 0x80);
+        }
+        midi.insert(midi.end(), digit, encoded.end());
     };
 
-    const auto sequences = sequence_infos(xmi);
-    if (sequenceIndex >= sequences.size())
+    const auto pop_note_off = [&]
     {
-        throw std::runtime_error("Invalid XMI: sequence index " + std::to_string(sequenceIndex) +
-                                 " is out of range for " + std::to_string(sequences.size()) + " sequence(s)");
-    }
+        std::pop_heap(first, last, later);
+        --last;
+        return *last;
+    };
 
-    const sequence_info& sequence = sequences[sequenceIndex];
-    cursor = xmi.data() + sequence.event_offset;
-    const std::uint8_t* const eventEnd = cursor + sequence.event_size;
-
-    std::vector<std::uint8_t> midi;
-    midi.reserve((xmi.size() * 2) + TrackDataOffset);
-    midi.insert(midi.end(), {'M', 'T', 'h', 'd'});
-    append_be32(midi, 6);
-    midi.push_back(0);
-    midi.push_back(0);
-    midi.push_back(0);
-    midi.push_back(1);
-    midi.push_back(static_cast<std::uint8_t>(MidiTimebase >> 8));
-    midi.push_back(static_cast<std::uint8_t>(MidiTimebase));
-    midi.insert(midi.end(), {'M', 'T', 'r', 'k', 0, 0, 0, 0});
-
-    std::array<NoteOffEvent, MaxNoteOffs> noteOffs{};
-    std::size_t noteOffCount = 0;
-    std::uint32_t quarterNoteMicros = DefaultQuarterNoteMicros;
-    bool expectDelta = true;
-
-    auto append_note_off = [&](const NoteOffEvent& event)
+    const auto append_note_off = [&](const NoteOffEvent& event)
     {
-        midi.push_back(event.status & 0x8F);
+        midi.push_back(event.status);
         midi.push_back(event.note);
         midi.push_back(0x7F);
-    };
-
-    auto queue_note_off = [&](std::uint32_t delta, std::uint8_t status, std::uint8_t note)
-    {
-        if (noteOffCount == noteOffs.size())
-        {
-            throw std::runtime_error("Too many pending note-off events");
-        }
-
-        const auto first = noteOffs.begin();
-        const auto last = first + static_cast<std::ptrdiff_t>(noteOffCount);
-        const auto insertAt = std::upper_bound(first, last, delta, [](std::uint32_t value, const NoteOffEvent& event)
-        {
-            return value < event.delta;
-        });
-
-        std::move_backward(insertAt, last, last + 1);
-        *insertAt = NoteOffEvent{delta, status, note};
-        ++noteOffCount;
-    };
-
-    auto pop_note_off = [&]
-    {
-        const NoteOffEvent event = noteOffs[0];
-        append_scaled_delta(midi, event.delta, quarterNoteMicros);
-        append_note_off(event);
-
-        for (std::size_t i = 1; i < noteOffCount; ++i)
-        {
-            noteOffs[i].delta -= event.delta;
-        }
-
-        std::move(noteOffs.begin() + 1, noteOffs.begin() + static_cast<std::ptrdiff_t>(noteOffCount),
-                  noteOffs.begin());
-        --noteOffCount;
-    };
-
-    auto begin_event = [&]
-    {
-        if (expectDelta)
-        {
-            append_scaled_delta(midi, 0, quarterNoteMicros);
-        }
-        expectDelta = true;
     };
 
     while (cursor < eventEnd)
     {
         if (*cursor < 0x80)
         {
-            std::uint32_t delay = read_xmi_delta(cursor, eventEnd);
-
-            while (noteOffCount != 0 && delay > noteOffs[0].delta)
+            std::uint32_t delay = 0;
+            while (cursor != eventEnd && *cursor == 0x7F)
             {
-                delay -= noteOffs[0].delta;
-                pop_note_off();
+                delay += *cursor++;
             }
+            need_bytes(cursor, eventEnd, 1, "XMI delta");
+            const auto targetTick = tick + (delay + *cursor++);
 
-            for (std::size_t i = 0; i < noteOffCount; ++i)
+            while (first != last && first->tick < targetTick)
             {
-                noteOffs[i].delta -= delay;
+                const auto event = pop_note_off();
+                append_delta(static_cast<std::uint32_t>(event.tick - tick));
+                append_note_off(event);
+                tick = event.tick;
             }
-
-            append_scaled_delta(midi, delay, quarterNoteMicros);
+            append_delta(static_cast<std::uint32_t>(targetTick - tick));
+            tick = targetTick;
             expectDelta = false;
             continue;
         }
 
-        const std::uint8_t status = *cursor;
+        const auto* start = cursor;
+        const auto status = *cursor;
+        const auto eventSize = channel_event_size(status);
+        if (eventSize == 0 && status != 0xFF && status != 0xF0 && status != 0xF7)
+        {
+            ++cursor;
+            expectDelta = true;
+            continue;
+        }
+
         if (status == 0xFF)
         {
             need_bytes(cursor, eventEnd, 2, "meta event");
-            const std::uint8_t metaType = cursor[1];
-            begin_event();
+        }
+        if (expectDelta)
+        {
+            append_delta(0);
+        }
+        expectDelta = true;
 
-            if (metaType == 0x2F)
+        if (eventSize != 0)
+        {
+            need_bytes(cursor, eventEnd, eventSize, "event payload");
+            cursor += eventSize;
+            midi.insert(midi.end(), start, cursor);
+            if ((status & 0xF0) == 0x90)
             {
-                cursor += 2;
-                const std::uint32_t metaLength = read_varlen(cursor, eventEnd);
-                skip_bytes(cursor, eventEnd, metaLength, "end-of-track payload");
-
-                for (std::size_t i = 0; i < noteOffCount; ++i)
+                const auto duration = read_varlen(cursor, eventEnd);
+                if (last == noteOffs.end())
                 {
-                    append_note_off(noteOffs[i]);
-                    append_scaled_delta(midi, 0, quarterNoteMicros);
+                    throw std::runtime_error("Too many pending note-off events");
                 }
-
-                midi.push_back(0xFF);
-                midi.push_back(0x2F);
-                midi.push_back(0);
-                break;
+                *last++ = {tick + duration, noteOrder++, static_cast<std::uint8_t>(status & 0x8F), start[1]};
+                std::push_heap(first, last, later);
             }
-
-            midi.push_back(*cursor++);
-            midi.push_back(*cursor++);
-            const std::uint8_t* const lengthStart = cursor;
-            const std::uint32_t metaLength = read_varlen(cursor, eventEnd);
-            midi.insert(midi.end(), lengthStart, cursor);
-            need_bytes(cursor, eventEnd, metaLength, "meta payload");
-
-            if (metaType == 0x51 && metaLength == 3)
-            {
-                quarterNoteMicros = (static_cast<std::uint32_t>(cursor[0]) << 16) |
-                                    (static_cast<std::uint32_t>(cursor[1]) << 8) |
-                                    static_cast<std::uint32_t>(cursor[2]);
-            }
-
-            midi.insert(midi.end(), cursor, cursor + metaLength);
-            cursor += metaLength;
+            continue;
         }
-        else if (status == 0xF0 || status == 0xF7)
+
+        const bool isMeta = status == 0xFF;
+        cursor += isMeta ? 2 : 1;
+        const auto payloadSize = read_varlen(cursor, eventEnd);
+        if (isMeta && start[1] == 0x2F)
         {
-            begin_event();
-            midi.push_back(*cursor++);
-            const std::uint8_t* const lengthStart = cursor;
-            const std::uint32_t sysexLength = read_varlen(cursor, eventEnd);
-            midi.insert(midi.end(), lengthStart, cursor);
-            append_bytes(midi, cursor, eventEnd, sysexLength);
+            need_bytes(cursor, eventEnd, payloadSize, "end-of-track payload");
+            while (first != last)
+            {
+                append_note_off(pop_note_off());
+                append_delta(0);
+            }
+            midi.insert(midi.end(), {0xFF, 0x2F, 0});
+            break;
         }
-        else
+
+        need_bytes(cursor, eventEnd, payloadSize, isMeta ? "meta payload" : "event payload");
+        if (isMeta && start[1] == 0x51 && payloadSize == 3)
         {
-            const std::size_t eventSize = channel_event_size(status);
-            if (eventSize == 0)
-            {
-                ++cursor;
-                expectDelta = true;
-                continue;
-            }
-
-            begin_event();
-            const std::uint8_t eventStatus = cursor[0];
-            const std::uint8_t eventNote = eventSize > 1 ? cursor[1] : 0;
-            append_bytes(midi, cursor, eventEnd, eventSize);
-
-            if ((eventStatus & 0xF0) == 0x90)
-            {
-                queue_note_off(read_varlen(cursor, eventEnd), eventStatus, eventNote);
-            }
+            quarterNoteMicros = read_be(cursor, 3);
         }
+        cursor += payloadSize;
+        midi.insert(midi.end(), start, cursor);
     }
 
-    const std::size_t trackLength = midi.size() - TrackDataOffset;
+    const auto trackLength = midi.size() - MidiHeader.size();
     if (trackLength > std::numeric_limits<std::uint32_t>::max())
     {
         throw std::runtime_error("MIDI track is too large");
     }
-
-    patch_be32(midi, TrackLengthOffset, static_cast<std::uint32_t>(trackLength));
+    for (std::size_t byte = 0; byte < 4; ++byte)
+    {
+        midi[TrackLengthOffset + byte] = static_cast<std::uint8_t>(trackLength >> (24 - 8 * byte));
+    }
     return midi;
+}
+
+inline std::vector<std::vector<std::uint8_t>> convert_sequences(std::span<const std::uint8_t> xmi,
+                                                                 std::span<const sequence_info> sequences)
+{
+    std::vector<std::vector<std::uint8_t>> midis;
+    midis.reserve(sequences.size());
+    for (const auto& sequence : sequences)
+    {
+        midis.push_back(convert_sequence(xmi, sequence));
+    }
+    return midis;
+}
+}
+
+inline std::vector<sequence_info> sequence_infos(std::span<const std::uint8_t> xmi)
+{
+    std::vector<sequence_info> sequences;
+    detail::scan_sequences(xmi, [&](const sequence_info& info) { sequences.push_back(info); });
+    return sequences;
+}
+
+inline std::size_t sequence_count(std::span<const std::uint8_t> xmi)
+{
+    return detail::scan_sequences(xmi, [](const sequence_info&) {});
+}
+
+inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi, std::size_t sequenceIndex)
+{
+    sequence_info sequence{};
+    const auto count = detail::scan_sequences(xmi, [&](const sequence_info& info)
+    {
+        if (info.index == sequenceIndex)
+        {
+            sequence = info;
+        }
+    });
+    detail::check_sequence_index(sequenceIndex, count);
+    return detail::convert_sequence(xmi, sequence);
 }
 
 inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi)
@@ -555,16 +442,7 @@ inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi)
 
 inline std::vector<std::vector<std::uint8_t>> convert_all(std::span<const std::uint8_t> xmi)
 {
-    const auto sequences = sequence_infos(xmi);
-    std::vector<std::vector<std::uint8_t>> midis;
-    midis.reserve(sequences.size());
-
-    for (const sequence_info& sequence : sequences)
-    {
-        midis.push_back(convert(xmi, sequence.index));
-    }
-
-    return midis;
+    return detail::convert_sequences(xmi, sequence_infos(xmi));
 }
 }
 
