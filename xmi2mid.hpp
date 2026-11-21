@@ -47,8 +47,8 @@ inline std::uint32_t read_be32(const std::uint8_t*& cursor, const std::uint8_t* 
     need_bytes(cursor, end, 4, "32-bit integer");
     const std::uint32_t value = (static_cast<std::uint32_t>(cursor[0]) << 24) |
                                 (static_cast<std::uint32_t>(cursor[1]) << 16) |
-                                (static_cast<std::uint32_t>(cursor[2]) << 8) |
-                                static_cast<std::uint32_t>(cursor[3]);
+                                (static_cast<std::uint32_t>(cursor[2]) <<  8) |
+                                 static_cast<std::uint32_t>(cursor[3]);
     cursor += 4;
     return value;
 }
@@ -262,16 +262,16 @@ inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi, std:
     {
         bytes.push_back(static_cast<std::uint8_t>(value >> 24));
         bytes.push_back(static_cast<std::uint8_t>(value >> 16));
-        bytes.push_back(static_cast<std::uint8_t>(value >> 8));
-        bytes.push_back(static_cast<std::uint8_t>(value));
+        bytes.push_back(static_cast<std::uint8_t>(value >>  8));
+        bytes.push_back(static_cast<std::uint8_t>(value >>  0));
     };
 
     auto patch_be32 = [](std::vector<std::uint8_t>& bytes, std::size_t offset, std::uint32_t value)
     {
-        bytes[offset] = static_cast<std::uint8_t>(value >> 24);
+        bytes[offset + 0] = static_cast<std::uint8_t>(value >> 24);
         bytes[offset + 1] = static_cast<std::uint8_t>(value >> 16);
-        bytes[offset + 2] = static_cast<std::uint8_t>(value >> 8);
-        bytes[offset + 3] = static_cast<std::uint8_t>(value);
+        bytes[offset + 2] = static_cast<std::uint8_t>(value >>  8);
+        bytes[offset + 3] = static_cast<std::uint8_t>(value >>  0);
     };
 
     auto read_varlen = [&](const std::uint8_t*& cursor, const std::uint8_t* end) -> std::uint32_t
@@ -500,8 +500,8 @@ inline std::vector<std::uint8_t> convert(std::span<const std::uint8_t> xmi, std:
             if (metaType == 0x51 && metaLength == 3)
             {
                 quarterNoteMicros = (static_cast<std::uint32_t>(cursor[0]) << 16) |
-                                    (static_cast<std::uint32_t>(cursor[1]) << 8) |
-                                    static_cast<std::uint32_t>(cursor[2]);
+                                    (static_cast<std::uint32_t>(cursor[1]) <<  8) |
+                                     static_cast<std::uint32_t>(cursor[2]);
             }
 
             midi.insert(midi.end(), cursor, cursor + metaLength);

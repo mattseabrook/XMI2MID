@@ -48,15 +48,22 @@ build() {
 
     local temp_output="$build_dir/xmi2mid"
     local flags=(
-        -std=c++23
-        -O3
-        -DNDEBUG
-        -Wall
-        -Wextra
-        -Wpedantic
+            -std=gnu++26
+            -O3
+            -ftree-vectorize
+            -fexpensive-optimizations
+            -ffunction-sections
+            -fdata-sections
+            -fopenmp
+            -fno-rtti
+            -DNDEBUG
+            -Wall
+            -Wextra
+            -Wpedantic
     )
 
-    "$compiler" "${flags[@]}" ${CXXFLAGS:-} "$source_file" -o "$temp_output" ${LDFLAGS:-}
+    "$compiler" "${flags[@]}" ${CXXFLAGS:-} "$source_file" -o "$temp_output" ${LDFLAGS:--Wl,--gc-sections -Wl,-s}
+
     cp -f "$temp_output" "$output"
     chmod +x "$output"
     echo "Built $output"
