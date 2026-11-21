@@ -5,28 +5,69 @@
 - [XMI Specifications](#xmi-specifications)
   - [Multiple XMI Songs](#multiple-xmi-songs)
 - [References](#references)
+- [Changelog](ChangeLog.md)
 
 # Usage
 
-List all XMI files from `Reference/AIL2/` and recurse subdirectories:
+Convert sequence 0 from `Reference/AIL2/DEMO.XMI`:
+
+```cmd
+xmi2mid.exe Reference\AIL2\DEMO.XMI demo.mid
+```
+
+```sh
+./xmi2mid Reference/AIL2/DEMO.XMI demo.mid
+```
+
+List the XMI sequences:
+
+```cmd
+xmi2mid.exe --list Reference\AIL2\DEMO.XMI
+```
+
+```sh
+./xmi2mid --list Reference/AIL2/DEMO.XMI
+```
+
+Convert one zero-based sequence explicitly:
+
+```cmd
+xmi2mid.exe --sequence 0 Reference\AIL2\DEMO.XMI demo.mid
+```
+
+```sh
+./xmi2mid --sequence 0 Reference/AIL2/DEMO.XMI demo.mid
+```
+
+Convert every sequence to separate files:
+
+```cmd
+xmi2mid.exe --all Reference\AIL2\DEMO.XMI demo
+```
+
+```sh
+./xmi2mid --all Reference/AIL2/DEMO.XMI demo
+```
+
+List sequences across files and directories. Add `-r` to include subdirectories.
+
 ```sh
 ./xmi2mid -rl Reference/AIL2/
+./xmi2mid --list Reference/AIL2/*.XMI
 ```
 
-Convert sequence 0 from `Reference/AIL2/DEMO.XMI` to currant path:
+Convert a specific sequence from each input, or export every sequence with `-s -1`.
+The destination directory is created as needed and defaults to the current directory.
+
 ```sh
-./xmi2mid -s 0 Reference/AIL2/DEMO.XMI
+./xmi2mid -s 0 Reference/AIL2/DEMO.XMI Reference/AIL2/SPKRDEMO.XMI -d mid
+./xmi2mid -rls -1 Reference/AIL2/ -d mid
 ```
 
-Convert every sequence from files in directory `Reference/AIL2/` to separate files in `mid`:
-```sh
-./xmi2mid -s -1 Reference/AIL2 -d mid
-```
-
-Convert every sequence from files in directory `Reference/AIL2/` including subdirectories to separate files in `mid`:
-```sh
-./xmi2mid -rls -1 Reference/AIL2 -d mid
-```
+For batch conversion, use `-s N` or `--sequence=N`. Omit the index after `-s` to
+export every sequence. Batch output uses the input stem and a zero-padded
+sequence number, such as `DEMO_00.mid`. If two inputs would write the same
+filename, the command reports an error.
 
 # Header Only Implementation
 
@@ -55,50 +96,42 @@ The conversion functions throw `std::runtime_error` for invalid or truncated XMI
 
 # Build
 
-Windows, from a normal, non-Administrator Developer PowerShell for Visual Studio 2022:
+Run `./build.sh` from the repository root to build for the host, or select a
+target explicitly. On Windows, run the script in Git Bash, MSYS2, or Cygwin.
 
-```cmd
-.\build.cmd
-.\build.cmd clean
-.\build.cmd rebuild
-```
+| Command | Output |
+| --- | --- |
+| `./build.sh linux` | `xmi2mid`, Linux ELF executable |
+| `./build.sh windows` | `xmi2mid.exe`, Windows x64 PE executable |
+| `./build.sh macos` | `xmi2mid-macos`, macOS Mach-O executable |
+| `./build.sh all` | All three executables, built in parallel |
+| `./build.sh clean` | Removes generated executables |
+| `./build.sh rebuild` | Cleans and builds for the host |
 
-`.\build.cmd` builds in your local `%TEMP%` directory, then copies `xmi2mid.exe` to the repository root. `.\build.cmd clean` removes build outputs from the repository root.
+Set `XMI2MID_OUTPUT_DIR` to write the executables outside the repository root.
+Set `CXXFLAGS` and `LDFLAGS` to add compiler and linker flags for the selected
+toolchain.
 
-Linux:
-
-```sh
-./build.sh
-./build.sh clean
-./build.sh rebuild
-```
-
-`./build.sh` builds in your local temporary directory, then copies `xmi2mid` to the repository root. Set `CXX`, `CXXFLAGS`, or `LDFLAGS` to override the default compiler or flags.
-
-macOS:
-
-```sh
-./build.command
-./build.command clean
-./build.command rebuild
-```
-
-`./build.command` asks Apple's toolchain for the default C++ compiler with `xcrun --find c++`, then falls back to `c++` if needed. If the compiler is missing, install Apple's Command Line Tools with `xcode-select --install`.
+- **Linux** uses a C++23 compiler. Set `CXX_LINUX` or `CXX` to select a compiler.
+  From another host, set `CXX_LINUX` to a configured Linux cross compiler and
+  `LINUX_SYSROOT` if it needs a separate sysroot.
+- **Windows** uses `clang-cl`, `lld-link`, and the Microsoft C++ SDK and static
+  CRT. On Windows, use an x64 Visual Studio developer environment. For
+  cross-builds, the script checks `WINSDK_BASE`, `/opt/winsdk`, the v64tng cache,
+  and the XMI2MID cache. Use `xwin splat --output <directory>` to provision the
+  SDK if needed, and set `WINSDK_BASE` to that directory. Set `MSVC_INCLUDE` if
+  the Microsoft STL headers are installed separately.
+- **macOS** uses Apple Clang from Xcode Command Line Tools on a Mac. To
+  cross-build, use osxcross, set `CXX_MACOS` to a configured macOS cross compiler,
+  or set `SDKROOT` to an Apple SDK with Clang, libc++, and `ld64.lld` available.
+  With automatic toolchain selection, set `MACOS_ARCH` to `arm64` or `x86_64`.
+  Native builds default to the host architecture, and automatic cross-builds
+  default to `x86_64`. An explicit `CXX_MACOS` supplies its own target. Set
+  `MACOSX_DEPLOYMENT_TARGET` to choose the minimum supported macOS version.
 
 # XMI Specifications
 
-XMIDI is the preprocessed MIDI sequence format used by the IBM Audio Interface Library 2.x and later Miles Sound System lineage.
-The primary source in this repository is John Miles' AIL2 release under
-
-- [Reference/AIL2](Reference/AIL2)
-- [XMIDI.TXT](Reference/AIL2/DOC/XMIDI.TXT)
-- [TOOLS.TXT](Reference/AIL2/DOC/TOOLS.TXT)
-- [API.TXT](Reference/AIL2/DOC/API.TXT)
-- [MIDIFORM.C](Reference/AIL2/MIDIFORM.C)
-- [XPLAY.C](Reference/AIL2/XPLAY.C)
-- [XMIDI.ASM](Reference/AIL2/XMIDI.ASM)
-
-External format summaries agree with the same overall structure [^1][^2].
+XMIDI is the preprocessed MIDI sequence format used by the IBM Audio Interface Library 2.x and later Miles Sound System lineage. The primary source in this repository is John Miles' AIL2 release under [Reference/AIL2](Reference/AIL2), especially [XMIDI.TXT](Reference/AIL2/DOC/XMIDI.TXT), [TOOLS.TXT](Reference/AIL2/DOC/TOOLS.TXT), [API.TXT](Reference/AIL2/DOC/API.TXT), [MIDIFORM.C](Reference/AIL2/MIDIFORM.C), [XPLAY.C](Reference/AIL2/XPLAY.C), and [XMIDI.ASM](Reference/AIL2/XMIDI.ASM). External format summaries agree with the same overall structure [1][2].
 
 XMIDI files are EA IFF-style containers. Chunk tags are four ASCII bytes, chunk lengths are 32-bit big-endian values, and chunk payloads are padded to an even byte boundary when another chunk follows. The AIL-local payload fields inside `INFO`, `TIMB`, and `RBRN` are DOS-native little-endian values in the original MIDIFORM output.
 
@@ -150,20 +183,6 @@ An XMI file can contain multiple songs because `CAT XMID` is a catalog of repeat
 
 # References
 
-1. [XMI Format][1] ModdingWiki. Synopsis: community-maintained technical notes on the XMI IFF layout, `XDIR`, `CAT XMID`, `TIMB`, `RBRN`, `EVNT`, note durations, and XMI delay encoding.
-2. [XMI][2] Video Game Music Preservation Foundation Wiki. Synopsis: preservation-oriented overview of XMI history, game usage, players/converters, IFF tree structure, 120 Hz timing, and multi-subsong layout.
-3. [KE5FX][3] Synopsis: John Miles' homepage and software archive, used here as the author/source reference point for the Audio Interface Library and Miles Sound System materials.
-
-# Footnotes
-
-[^1]: [XMI Formart][1]
-[^2]: [XMI][2]
-[^3]: [John Miles, KE5FX][3]
-[^4]: [2015 Refactor for Visual Studio 2013 by Kimio Ito][4]
-[^5]: [Original XMI2MID for DOS from VGMPF][5]
-
-[1]: <https://moddingwiki.shikadi.net/wiki/XMI_Format> "XMI Format"
-[2]: <https://vgmpf.com/Wiki/index.php?title=XMI> "XMI"
-[3]: <http://www.ke5fx.com> "John Miles, KE5FX"
-[4]: <https://sourceforge.net/projects/midi-converter/files/xmi-to-midi/151216/> "2015 Refactor for Visual Studio 2013 by Kimio Ito"
-[5]: <http://www.vgmpf.com/Wiki/index.php?title=XMI_to_MIDI> "Original XMI2MID for DOS from VGMPF"
+1. ["XMI Format."](https://moddingwiki.shikadi.net/wiki/XMI_Format) ModdingWiki. Synopsis: community-maintained technical notes on the XMI IFF layout, `XDIR`, `CAT XMID`, `TIMB`, `RBRN`, `EVNT`, note durations, and XMI delay encoding.
+2. ["XMI."](https://vgmpf.com/Wiki/index.php?title=XMI) Video Game Music Preservation Foundation Wiki. Synopsis: preservation-oriented overview of XMI history, game usage, players/converters, IFF tree structure, 120 Hz timing, and multi-subsong layout.
+3. [John Miles, KE5FX.](http://www.ke5fx.com/) Synopsis: John Miles' homepage and software archive, used here as the author/source reference point for the Audio Interface Library and Miles Sound System materials.

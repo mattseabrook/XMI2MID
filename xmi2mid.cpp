@@ -32,24 +32,539 @@
 
 */
 
-#include "config.hpp"
+#include "xmi2mid.hpp"
+
+#include <algorithm>
+#include <charconv>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <optional>
+#include <set>
+#include <span>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+
+namespace
+{
+struct BatchOptions
+{
+    bool help = false;
+    bool list = false;
+    bool recursive = false;
+    bool all = false;
+    std::optional<std::size_t> sequenceIndex;
+    std::filesystem::path outputDirectory = ".";
+    std::vector<std::filesystem::path> inputs;
+};
+
+std::vector<std::uint8_t> read_file(const std::filesystem::path& path)
+{
+    const std::uintmax_t fileSize = std::filesystem::file_size(path);
+    if (fileSize > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max()) ||
+        fileSize > std::numeric_limits<std::size_t>::max())
+    {
+        throw std::runtime_error("Input file is too large");
+    }
+
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(fileSize));
+    std::ifstream file(path, std::ios::binary);
+    if (!file)
+    {
+        throw std::runtime_error("Cannot open input file " + path.string());
+    }
+
+    if (!bytes.empty() &&
+        !file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+    {
+        throw std::runtime_error("Cannot read input file " + path.string());
+    }
+    return bytes;
+}
+
+void write_file(const std::filesystem::path& path, std::span<const std::uint8_t> bytes)
+{
+    std::ofstream file(path, std::ios::binary);
+    if (!file)
+    {
+        throw std::runtime_error("Cannot open output file " + path.string());
+    }
+
+    file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    file.close();
+    if (!file)
+    {
+        throw std::runtime_error("Cannot write output file " + path.string());
+    }
+}
+
+std::size_t parse_sequence_index(std::string_view text)
+{
+    if (text.empty())
+    {
+        throw std::runtime_error("Missing sequence index");
+    }
+
+    std::size_t value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (end != text.data() + text.size() || error == std::errc::invalid_argument)
+    {
+        throw std::runtime_error("Invalid sequence index " + std::string(text));
+    }
+    if (error == std::errc::result_out_of_range)
+    {
+        throw std::runtime_error("Sequence index is too large");
+    }
+    return value;
+}
+
+bool is_signed_index(std::string_view text)
+{
+    if (text.starts_with('-') || text.starts_with('+'))
+    {
+        text.remove_prefix(1);
+    }
+    return !text.empty() && text.find_first_not_of("0123456789") == std::string_view::npos;
+}
+
+void select_sequences(BatchOptions& options, std::string_view index)
+{
+    if (!index.empty())
+    {
+        const bool negative = index.starts_with('-');
+        const auto value = parse_sequence_index(index.substr(negative || index.starts_with('+') ? 1 : 0));
+        if (!negative || value == 0)
+        {
+            options.sequenceIndex = value;
+            options.all = false;
+            return;
+        }
+    }
+    options.sequenceIndex.reset();
+    options.all = true;
+}
+
+bool is_option(std::string_view text)
+{
+    return text.size() > 1 && text.front() == '-';
+}
+
+BatchOptions parse_batch_options(int argc, char* argv[])
+{
+    BatchOptions options;
+    bool endOfOptions = false;
+    for (int i = 1; i < argc; ++i)
+    {
+        const std::string_view arg = argv[i];
+        if (endOfOptions || !is_option(arg))
+        {
+            options.inputs.emplace_back(argv[i]);
+            continue;
+        }
+        if (arg == "--")
+        {
+            endOfOptions = true;
+            continue;
+        }
+
+        std::string_view flags = arg.substr(1);
+        std::string_view value;
+        if (arg.starts_with("--"))
+        {
+            const auto separator = arg.find('=');
+            const auto name = arg.substr(0, separator);
+            if (name == "--sequence")
+            {
+                flags = "s";
+            }
+            else if (name == "--output-directory")
+            {
+                flags = "d";
+            }
+            else if (arg == "--list")
+            {
+                flags = "l";
+            }
+            else if (arg == "--recursive")
+            {
+                flags = "r";
+            }
+            else if (arg == "--help")
+            {
+                flags = "h";
+            }
+            else if (arg == "--all")
+            {
+                select_sequences(options, {});
+                continue;
+            }
+            else
+            {
+                throw std::runtime_error("Unknown option " + std::string(arg));
+            }
+
+            if (separator != std::string_view::npos)
+            {
+                value = arg.substr(separator + 1);
+                if (value.empty())
+                {
+                    throw std::runtime_error("Missing value for " + std::string(name));
+                }
+            }
+        }
+
+        for (std::size_t j = 0; j < flags.size(); ++j)
+        {
+            const char flag = flags[j];
+            switch (flag)
+            {
+            case 'h':
+                options.help = true;
+                continue;
+            case 'l':
+                options.list = true;
+                continue;
+            case 'r':
+                options.recursive = true;
+                continue;
+            case 's':
+            case 'd':
+                break;
+            default:
+                throw std::runtime_error("Unknown option " + std::string(arg));
+            }
+
+            if (j + 1 < flags.size())
+            {
+                value = flags.substr(j + 1);
+            }
+            if (flag == 's')
+            {
+                if (value.empty() && i + 1 < argc && is_signed_index(argv[i + 1]))
+                {
+                    value = argv[++i];
+                }
+                select_sequences(options, value);
+            }
+            else
+            {
+                if (value.empty() && i + 1 < argc && !is_option(argv[i + 1]))
+                {
+                    value = argv[++i];
+                }
+                if (value.empty())
+                {
+                    throw std::runtime_error("Missing output directory");
+                }
+                options.outputDirectory = value;
+            }
+            break;
+        }
+    }
+    return options;
+}
+
+std::string sequence_suffix(std::size_t index, std::size_t count)
+{
+    const std::size_t width = std::max<std::size_t>(2, std::to_string(count == 0 ? 0 : count - 1).size());
+    std::ostringstream suffix;
+    suffix << std::setfill('0') << std::setw(static_cast<int>(width)) << index;
+    return suffix.str();
+}
+
+std::filesystem::path sequence_output_path(const std::filesystem::path& inputPath,
+                                           const std::filesystem::path& outputTarget,
+                                           std::size_t index,
+                                           std::size_t count)
+{
+    const std::string suffix = sequence_suffix(index, count);
+    if (std::filesystem::is_directory(outputTarget))
+    {
+        auto filename = inputPath.stem();
+        filename += "_" + suffix + ".mid";
+        return outputTarget / filename;
+    }
+
+    std::filesystem::path extension = outputTarget.extension();
+    if (extension.empty())
+    {
+        extension = ".mid";
+    }
+
+    auto stem = outputTarget.stem();
+    if (stem.empty())
+    {
+        stem = inputPath.stem();
+    }
+
+    stem += "_" + suffix;
+    stem += extension;
+    return outputTarget.parent_path() / stem;
+}
+
+void write_conversion(const std::filesystem::path& inputPath, const std::filesystem::path& outputPath,
+                      std::span<const std::uint8_t> midiData, std::size_t index)
+{
+    write_file(outputPath, midiData);
+    std::cout << "Converted sequence " << index << " from "
+              << inputPath.string() << " to " << outputPath.string() << '\n';
+}
+
+void print_sequence_list(const std::filesystem::path& inputPath, const std::vector<xmi2mid::sequence_info>& sequences)
+{
+    std::cout << inputPath.string() << ": " << sequences.size() << " sequence(s)\n";
+    for (const xmi2mid::sequence_info& sequence : sequences)
+    {
+        std::cout << "  [" << sequence.index << "] "
+                  << "FORM offset " << sequence.form_offset
+                  << ", FORM bytes " << sequence.form_size
+                  << ", EVNT offset " << sequence.event_offset
+                  << ", EVNT bytes " << sequence.event_size
+                  << ", TIMB " << (sequence.has_timb ? "yes" : "no")
+                  << ", RBRN " << (sequence.has_rbrn ? "yes" : "no") << '\n';
+    }
+}
+
+std::vector<std::filesystem::path> collect_input_files(const BatchOptions& options)
+{
+    std::vector<std::filesystem::path> files;
+    for (const auto& input : options.inputs)
+    {
+        const auto status = std::filesystem::status(input);
+        if (std::filesystem::is_regular_file(status))
+        {
+            files.push_back(input);
+        }
+        else if (std::filesystem::is_directory(status))
+        {
+            std::vector<std::filesystem::path> entries;
+            auto add_file = [&](const std::filesystem::directory_entry& entry)
+            {
+                if (entry.is_regular_file())
+                {
+                    entries.push_back(entry.path());
+                }
+            };
+
+            if (options.recursive)
+            {
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(input))
+                {
+                    add_file(entry);
+                }
+            }
+            else
+            {
+                for (const auto& entry : std::filesystem::directory_iterator(input))
+                {
+                    add_file(entry);
+                }
+            }
+            std::sort(entries.begin(), entries.end());
+            files.insert(files.end(), entries.begin(), entries.end());
+        }
+        else
+        {
+            throw std::runtime_error("Cannot read input path " + input.string());
+        }
+    }
+    return files;
+}
+
+bool has_xmi_extension(const std::filesystem::path& path)
+{
+    const auto extension = path.extension().string();
+    return extension.size() == 4 && extension[0] == '.' &&
+           (extension[1] == 'x' || extension[1] == 'X') &&
+           (extension[2] == 'm' || extension[2] == 'M') &&
+           (extension[3] == 'i' || extension[3] == 'I');
+}
+
+int run_batch(const BatchOptions& options)
+{
+    const auto files = collect_input_files(options);
+    std::set<std::filesystem::path> seenInputs;
+    std::set<std::filesystem::path> writtenOutputs;
+    std::size_t sourceCount = 0;
+    std::size_t sequenceCount = 0;
+    std::size_t outputCount = 0;
+    bool failed = false;
+    for (const auto& inputPath : files)
+    {
+        try
+        {
+            if (!seenInputs.insert(std::filesystem::canonical(inputPath)).second)
+            {
+                continue;
+            }
+            const auto xmiData = read_file(inputPath);
+            std::vector<xmi2mid::sequence_info> sequences;
+            try
+            {
+                sequences = xmi2mid::sequence_infos(xmiData);
+            }
+            catch (const std::runtime_error&)
+            {
+                if (has_xmi_extension(inputPath))
+                {
+                    throw;
+                }
+                continue;
+            }
+
+            ++sourceCount;
+            sequenceCount += sequences.size();
+            if (options.list)
+            {
+                print_sequence_list(inputPath, sequences);
+            }
+            if (!options.all && !options.sequenceIndex)
+            {
+                continue;
+            }
+
+            const auto write_sequence = [&](std::span<const std::uint8_t> midiData, std::size_t index)
+            {
+                const auto outputPath = sequence_output_path(inputPath, options.outputDirectory, index, sequences.size());
+                if (!writtenOutputs.insert(std::filesystem::weakly_canonical(outputPath)).second)
+                {
+                    throw std::runtime_error("Multiple inputs produce " + outputPath.string());
+                }
+                write_conversion(inputPath, outputPath, midiData, index);
+                ++outputCount;
+            };
+
+            std::filesystem::create_directories(options.outputDirectory);
+            if (options.all)
+            {
+                const auto midiFiles = xmi2mid::convert_all(xmiData);
+                for (std::size_t index = 0; index < midiFiles.size(); ++index)
+                {
+                    write_sequence(midiFiles[index], index);
+                }
+            }
+            else
+            {
+                const auto midiData = xmi2mid::convert(xmiData, *options.sequenceIndex);
+                write_sequence(midiData, *options.sequenceIndex);
+            }
+        }
+        catch (const std::runtime_error& error)
+        {
+            std::cerr << "Error: " << inputPath.string() << ": " << error.what() << '\n';
+            failed = true;
+        }
+    }
+    if (sourceCount == 0)
+    {
+        std::cerr << "Error: No XMI files found\n";
+        return 1;
+    }
+    std::cout << sourceCount << " XMI file(s), " << sequenceCount << " sequence(s), "
+              << outputCount << " MIDI file(s) written\n";
+    return failed ? 1 : 0;
+}
+
+void print_usage(const char* program)
+{
+    std::cerr << "Usage:\n"
+              << "  " << program << " Reference/AIL2/DEMO.XMI demo.mid\n"
+              << "  " << program << " --sequence 0 Reference/AIL2/DEMO.XMI demo.mid\n"
+              << "  " << program << " --all Reference/AIL2/DEMO.XMI demo\n"
+              << "  " << program << " --list Reference/AIL2/DEMO.XMI\n"
+              << "  " << program << " [options] input...\n"
+              << "    -l, --list                      List XMI sequences\n"
+              << "    -r, --recursive                 Include subdirectories\n"
+              << "    -s, --sequence[=N]              Convert sequence N, or all if omitted or negative\n"
+              << "    -d, --output-directory DIR      Write MIDI files to DIR (default: current directory)\n"
+              << "    -h, --help                      Show usage\n";
+}
+}
 
 int main(int argc, char* argv[])
 {
+    if (argc < 2)
+    {
+        print_usage(argv[0]);
+        return 1;
+    }
+
     try
     {
-        if (cfg::program_args(argc, argv) && cfg::seq)
+        const std::string_view command = argv[1];
+
+        if (command == "--help" || command == "-h")
         {
-            if (!cfg::dst.empty()) create_directories(cfg::dst);
-            if (!cfg::sequences_convert()) exit(EXIT_FAILURE);
+            print_usage(argv[0]);
+            return 0;
         }
-        cfg::print_sequence_summary();
+
+        if (command == "--list" && argc == 3 && !is_option(argv[2]) &&
+            std::filesystem::is_regular_file(argv[2]))
+        {
+            const std::filesystem::path inputPath = argv[2];
+            const auto xmiData = read_file(inputPath);
+            print_sequence_list(inputPath, xmi2mid::sequence_infos(xmiData));
+            return 0;
+        }
+
+        if (command == "--sequence" && argc == 5 &&
+            !is_option(argv[2]) && !std::string_view(argv[2]).starts_with('+') &&
+            !is_option(argv[3]) && !is_option(argv[4]))
+        {
+            const std::size_t sequenceIndex = parse_sequence_index(argv[2]);
+            const std::filesystem::path inputPath = argv[3];
+            const std::filesystem::path outputPath = argv[4];
+            const auto xmiData = read_file(inputPath);
+            const auto midiData = xmi2mid::convert(xmiData, sequenceIndex);
+            write_conversion(inputPath, outputPath, midiData, sequenceIndex);
+            return 0;
+        }
+
+        if (command == "--all" && argc == 4 && !is_option(argv[2]) && !is_option(argv[3]))
+        {
+            const std::filesystem::path inputPath = argv[2];
+            const std::filesystem::path outputTarget = argv[3];
+            const auto xmiData = read_file(inputPath);
+            const auto midiFiles = xmi2mid::convert_all(xmiData);
+
+            for (std::size_t index = 0; index < midiFiles.size(); ++index)
+            {
+                const std::filesystem::path outputPath =
+                    sequence_output_path(inputPath, outputTarget, index, midiFiles.size());
+                write_conversion(inputPath, outputPath, midiFiles[index], index);
+            }
+            return 0;
+        }
+
+        if (argc == 3 && !is_option(command) && !is_option(argv[2]))
+        {
+            const std::filesystem::path inputPath = argv[1];
+            const std::filesystem::path outputPath = argv[2];
+            const auto xmiData = read_file(inputPath);
+            const auto midiData = xmi2mid::convert(xmiData);
+            write_conversion(inputPath, outputPath, midiData, 0);
+            return 0;
+        }
+
+        const auto options = parse_batch_options(argc, argv);
+        if (options.help || options.inputs.empty())
+        {
+            print_usage(argv[0]);
+            return options.help ? 0 : 1;
+        }
+        return run_batch(options);
     }
     catch (const std::exception& error)
     {
-        fprintf(stderr, "Error: %s\n", std::string{error.what()}.c_str());
-        exit(EXIT_FAILURE);
+        std::cerr << "Error: " << error.what() << '\n';
+        return 1;
     }
-    exit(EXIT_SUCCESS);
 }
-

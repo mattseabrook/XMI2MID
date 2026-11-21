@@ -1,5 +1,6 @@
 **Table-of-Contents**
 - [CHANGELOG](#changelog)
+  - [2026-11-20](#2026-11-20)
   - [2026-04-28](#2026-04-28)
   - [2026-04-24](#2026-04-24)
     - [Source](#source)
@@ -12,6 +13,13 @@
   - [1994](#1994)
 
 # CHANGELOG
+
+## 2026-11-20
+
+- Added batch sequence listing and conversion for multiple XMI files and directories.
+- Added recursive scanning and automatic output filenames with zero-padded sequence numbers.
+- Unified Linux, Windows, and macOS targets in `build.sh`.
+- Moved the changelog out of the README and removed generated executables from source control.
 
 ## 2026-04-28
 
@@ -158,7 +166,7 @@ The 2023 version was a conservative C-to-C++ lift of Kimio Ito's 2015 Visual Stu
 
 ## 2015
 
-- [2015 Refactor for Visual Studio 2013 by Kimio Ito][4]
+- [2015 Refactor for Visual Studio 2013 by Kimio Ito](https://sourceforge.net/projects/midi-converter/files/xmi-to-midi/151216/)
 
 ## 1994
 
@@ -166,16 +174,4 @@ The 2023 version was a conservative C-to-C++ lift of Kimio Ito's 2015 Visual Stu
 | ----------- | ---------- | -------- |
 | Markus Hein | 1994-02-04 | DOS      |
 
-- [Original XMI2MID for DOS from VGMPF][5]
-
-[^1]: [XMI Formart][1]
-[^2]: [XMI][2]
-[^3]: [John Miles, KE5FX][3]
-[^4]: [2015 Refactor for Visual Studio 2013 by Kimio Ito][4]
-[^5]: [Original XMI2MID for DOS from VGMPF][5]
-
-[1]: <https://moddingwiki.shikadi.net/wiki/XMI_Format> "XMI Format"
-[2]: <https://vgmpf.com/Wiki/index.php?title=XMI> "XMI"
-[3]: <http://www.ke5fx.com> "John Miles, KE5FX"
-[4]: <https://sourceforge.net/projects/midi-converter/files/xmi-to-midi/151216/> "2015 Refactor for Visual Studio 2013 by Kimio Ito"
-[5]: <http://www.vgmpf.com/Wiki/index.php?title=XMI_to_MIDI> "Original XMI2MID for DOS from VGMPF"
+- [Original XMI2MID for DOS from VGMPF](http://www.vgmpf.com/Wiki/index.php?title=XMI_to_MIDI)
