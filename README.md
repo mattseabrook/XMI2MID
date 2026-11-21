@@ -49,6 +49,16 @@ xmi2mid.exe --all Reference\AIL2\DEMO.XMI demo
 ./xmi2mid --all Reference/AIL2/DEMO.XMI demo
 ```
 
+Convert a whole folder of XMI files, including its subfolders.
+
+```sh
+./xmi2mid --all music/ midi/
+```
+
+XMI2MID creates the destination as needed and keeps the input folder layout.
+For example, `music/level1/theme.xmi` produces `midi/level1/theme_00.mid` and one
+additional MIDI file for each remaining sequence.
+
 List sequences across files and directories. Add `-r` to include subdirectories.
 
 ```sh
@@ -61,13 +71,12 @@ The destination directory is created as needed and defaults to the current direc
 
 ```sh
 ./xmi2mid -s 0 Reference/AIL2/DEMO.XMI Reference/AIL2/SPKRDEMO.XMI -d mid
-./xmi2mid -rls -1 Reference/AIL2/ -d mid
 ```
 
 For batch conversion, use `-s N` or `--sequence=N`. Omit the index after `-s` to
 export every sequence. Batch output uses the input stem and a zero-padded
-sequence number, such as `DEMO_00.mid`. If two inputs would write the same
-filename, the command reports an error.
+sequence number, such as `DEMO_00.mid`. If two inputs would write to the same
+output path, the command reports an error.
 
 # Header Only Implementation
 

@@ -332,7 +332,8 @@ void print_sequence_list(const std::filesystem::path& inputPath, const std::vect
     }
 }
 
-std::vector<std::filesystem::path> collect_input_files(const BatchOptions& options)
+std::vector<std::filesystem::path> collect_input_files(const BatchOptions& options,
+                                                       const std::filesystem::path& excludedDirectory)
 {
     std::vector<std::filesystem::path> files;
     for (const auto& input : options.inputs)
@@ -355,9 +356,16 @@ std::vector<std::filesystem::path> collect_input_files(const BatchOptions& optio
 
             if (options.recursive)
             {
-                for (const auto& entry : std::filesystem::recursive_directory_iterator(input))
+                for (auto entry = std::filesystem::recursive_directory_iterator(input);
+                     entry != std::filesystem::recursive_directory_iterator(); ++entry)
                 {
-                    add_file(entry);
+                    if (!excludedDirectory.empty() && entry->is_directory() &&
+                        std::filesystem::canonical(entry->path()) == excludedDirectory)
+                    {
+                        entry.disable_recursion_pending();
+                        continue;
+                    }
+                    add_file(*entry);
                 }
             }
             else
@@ -387,9 +395,11 @@ bool has_xmi_extension(const std::filesystem::path& path)
            (extension[3] == 'i' || extension[3] == 'I');
 }
 
-int run_batch(const BatchOptions& options)
+int run_batch(const BatchOptions& options, const std::filesystem::path& sourceDirectory = {})
 {
-    const auto files = collect_input_files(options);
+    const auto excludedDirectory = sourceDirectory.empty() ? std::filesystem::path{} :
+        std::filesystem::weakly_canonical(options.outputDirectory);
+    const auto files = collect_input_files(options, excludedDirectory);
     std::set<std::filesystem::path> seenInputs;
     std::set<std::filesystem::path> writtenOutputs;
     std::size_t sourceCount = 0;
@@ -430,9 +440,19 @@ int run_batch(const BatchOptions& options)
                 continue;
             }
 
+            auto outputDirectory = options.outputDirectory;
+            if (!sourceDirectory.empty())
+            {
+                const auto relativeDirectory = inputPath.parent_path().lexically_relative(sourceDirectory);
+                if (relativeDirectory != ".")
+                {
+                    outputDirectory /= relativeDirectory;
+                }
+            }
+
             const auto write_sequence = [&](std::span<const std::uint8_t> midiData, std::size_t index)
             {
-                const auto outputPath = sequence_output_path(inputPath, options.outputDirectory, index, sequences.size());
+                const auto outputPath = sequence_output_path(inputPath, outputDirectory, index, sequences.size());
                 if (!writtenOutputs.insert(std::filesystem::weakly_canonical(outputPath)).second)
                 {
                     throw std::runtime_error("Multiple inputs produce " + outputPath.string());
@@ -441,7 +461,7 @@ int run_batch(const BatchOptions& options)
                 ++outputCount;
             };
 
-            std::filesystem::create_directories(options.outputDirectory);
+            std::filesystem::create_directories(outputDirectory);
             if (options.all)
             {
                 const auto midiFiles = xmi2mid::convert_all(xmiData);
@@ -478,6 +498,7 @@ void print_usage(const char* program)
               << "  " << program << " Reference/AIL2/DEMO.XMI demo.mid\n"
               << "  " << program << " --sequence 0 Reference/AIL2/DEMO.XMI demo.mid\n"
               << "  " << program << " --all Reference/AIL2/DEMO.XMI demo\n"
+              << "  " << program << " --all music/ midi/             Convert a folder and its subfolders\n"
               << "  " << program << " --list Reference/AIL2/DEMO.XMI\n"
               << "  " << program << " [options] input...\n"
               << "    -l, --list                      List XMI sequences\n"
@@ -532,6 +553,16 @@ int main(int argc, char* argv[])
         {
             const std::filesystem::path inputPath = argv[2];
             const std::filesystem::path outputTarget = argv[3];
+            if (std::filesystem::is_directory(inputPath))
+            {
+                BatchOptions options;
+                options.all = true;
+                options.recursive = true;
+                options.outputDirectory = outputTarget;
+                options.inputs.push_back(inputPath);
+                return run_batch(options, inputPath);
+            }
+
             const auto xmiData = read_file(inputPath);
             const auto midiFiles = xmi2mid::convert_all(xmiData);
 
