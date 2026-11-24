@@ -105,8 +105,6 @@ void write_conversion(const std::filesystem::path& inputPath, const std::filesys
     {
         throw std::runtime_error("Cannot write output file " + outputPath.string());
     }
-    std::cout << "Converted sequence " << index << " from "
-              << inputPath.string() << " to " << outputPath.string() << '\n';
 }
 
 void convert_file(const std::filesystem::path& inputPath, const std::filesystem::path& outputPath,
@@ -314,19 +312,20 @@ SequencePaths sequence_paths(const std::filesystem::path& inputPath,
     return {outputTarget.parent_path() / stem, extension, width};
 }
 
-void print_sequence_list(const std::filesystem::path& inputPath, const std::vector<xmi2mid::sequence_info>& sequences)
+void print_sequence_list(size_t i, const std::filesystem::path& inputPath, const std::vector<xmi2mid::sequence_info>& sequences, const std::filesystem::path& outputPath = ".")
 {
-    std::cout << inputPath.string() << ": " << sequences.size() << " sequence(s)\n";
-    for (const xmi2mid::sequence_info& sequence : sequences)
-    {
-        std::cout << "  [" << sequence.index << "] "
-                  << "FORM offset " << sequence.form_offset
-                  << ", FORM bytes " << sequence.form_size
-                  << ", EVNT offset " << sequence.event_offset
-                  << ", EVNT bytes " << sequence.event_size
-                  << ", TIMB " << (sequence.has_timb ? "yes" : "no")
-                  << ", RBRN " << (sequence.has_rbrn ? "yes" : "no") << '\n';
-    }
+	printf("[%7zu] %s\n", i, inputPath.c_str());
+	fprintf(stdout, "[SEQ:IDX] [XMID:OFF|XMID:LEN] [EVNT:OFF|EVNT:LEN] [TIMB|RBRN]\n");
+	for (const xmi2mid::sequence_info& sequence : sequences)
+	{
+		fprintf(stdout, "[%7zu] [%8zu|%8zu] [%8zu|%8zu] [%4s|%4s]\n",
+				sequence.index, sequence.form_offset,
+				sequence.form_size, sequence.event_offset,
+				sequence.event_size, sequence.has_timb ? " on " : "    ",
+				sequence.has_rbrn ? " on " : "    ");
+	}
+	fprintf(stdout, "[%7zu] %s\n", sequences.size(), outputPath.c_str());
+	puts("");
 }
 
 std::vector<std::filesystem::path> collect_input_files(const BatchOptions& options,
@@ -429,7 +428,7 @@ int run_batch(const BatchOptions& options, const std::filesystem::path& sourceDi
             sequenceCount += sequences.size();
             if (options.list)
             {
-                print_sequence_list(inputPath, sequences);
+                print_sequence_list(sourceCount-1, inputPath, sequences, options.outputDirectory);
             }
             if (!options.all && !options.sequenceIndex)
             {
@@ -485,8 +484,8 @@ int run_batch(const BatchOptions& options, const std::filesystem::path& sourceDi
         std::cerr << "Error: No XMI files found\n";
         return 1;
     }
-    std::cout << sourceCount << " XMI file(s), " << sequenceCount << " sequence(s), "
-              << outputCount << " MIDI file(s) written\n";
+    fprintf(stdout, "[XMI:CNT] [ SEQ:CNT| MID:CNT] [DST:DIR]\n");
+    fprintf(stdout, "[%7zu] [%8zu|%8zu] %s\n", sourceCount, sequenceCount, outputCount, options.outputDirectory.c_str());
     return failed ? 1 : 0;
 }
 
@@ -529,8 +528,8 @@ int main(int argc, char* argv[])
             std::filesystem::is_regular_file(argv[2]))
         {
             const std::filesystem::path inputPath = argv[2];
-            const auto xmiData = read_file(inputPath);
-            print_sequence_list(inputPath, xmi2mid::sequence_infos(xmiData));
+            const auto xmiData = read_file(inputPath);;
+            print_sequence_list(0, inputPath, xmi2mid::sequence_infos(xmiData), ".");
             return 0;
         }
 
